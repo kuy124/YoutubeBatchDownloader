@@ -19,6 +19,15 @@ sys.excepthook = handle_exception
 
 def main():
     log.info("Application starting...")
+    
+    # Force Windows shell to associate custom title bar icon with the taskbar icon slot
+    try:
+        import ctypes
+        myappid = 'windows.downloader.yt-dlp.v1'
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+    except Exception:
+        pass
+        
     app = QApplication(sys.argv)
     
     # Modern styling fallback

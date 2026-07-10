@@ -8,14 +8,13 @@ class Settings:
         self.settings_file = os.path.join(get_root_dir(), "settings.json")
         self.default_downloads = os.path.join(get_root_dir(), "downloads")
         
-        # Clean defaults: MP3 Audio format, 480p quality, no active checkboxes on launch
+        # Clean defaults: MP3 Audio, 480p, and all extra behaviors unchecked initially
         self.config = {
             "download_path": self.default_downloads,
             "format": "MP3 Audio",
             "quality": "480p",
-            "merge_auto": False,
-            "embed_thumbnail": False,
-            "embed_metadata": False,
+            "auto_clear": False,
+            "monitor_clipboard": False,  # Clipboard auto-monitor setting
             "threads": 3
         }
         self.load()
@@ -25,7 +24,6 @@ class Settings:
             try:
                 with open(self.settings_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                    # Merge existing values on top of clean defaults
                     self.config.update(data)
                 log.info("Settings loaded successfully.")
             except Exception as e:

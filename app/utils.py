@@ -28,6 +28,21 @@ def get_ffmpeg_path() -> str:
         
     return ""
 
+def get_icon_path() -> str:
+    """Returns the absolute path to icon.ico (bundled or local workspace)."""
+    # 1. Check if running inside PyInstaller virtual unpacked environment (_MEIPASS)
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        bundled_icon = os.path.join(sys._MEIPASS, "icon.ico")
+        if os.path.exists(bundled_icon):
+            return bundled_icon
+
+    # 2. Check developer workspace
+    local_icon = os.path.join(get_root_dir(), "icon.ico")
+    if os.path.exists(local_icon):
+        return local_icon
+        
+    return ""
+
 def format_speed(speed_bytes) -> str:
     if speed_bytes is None:
         return "0 KB/s"

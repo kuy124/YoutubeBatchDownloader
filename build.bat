@@ -39,12 +39,16 @@ echo [INFO] Installing PyInstaller in virtual environment...
 pip install pyinstaller
 :pyinstaller_ok
 
-:: 5. Execute compilation safely without multiline caret variables
+:: Ensure icon.ico exists in workspace root before compiling
+if exist icon.ico goto icon_ok
+echo [WARNING] icon.ico not found in root. It is highly recommended to place an icon.ico in the root folder before compiling.
+:icon_ok
+
+:: 5. Execute compilation safely and bundle the icon asset as data
 echo Compiling standalone executable with PyInstaller...
 if exist icon.ico (
-    pyinstaller --windowed --onefile --add-data "tools;tools" --collect-all yt_dlp --hidden-import=yt_dlp --exclude-module urllib3.contrib.emscripten --icon icon.ico --name "YouTubeBatchDownloader" app/main.py
+    pyinstaller --windowed --onefile --add-data "tools;tools" --add-data "icon.ico;." --collect-all yt_dlp --hidden-import=yt_dlp --exclude-module urllib3.contrib.emscripten --icon icon.ico --name "YouTubeBatchDownloader" app/main.py
 ) else (
-    echo [INFO] No icon.ico found in root. Building with default system icon.
     pyinstaller --windowed --onefile --add-data "tools;tools" --collect-all yt_dlp --hidden-import=yt_dlp --exclude-module urllib3.contrib.emscripten --name "YouTubeBatchDownloader" app/main.py
 )
 

@@ -1,6 +1,6 @@
 # YouTube Batch Downloader
 
-A lightweight Windows desktop application for downloading YouTube videos in batches. Built with Python, PySide6, and `yt-dlp`, this tool runs downloads in the background to ensure the user interface remains responsive.
+A Windows desktop application for downloading YouTube videos in batches. Built with Python, PySide6, and `yt-dlp`, this tool runs downloads in the background to ensure the user interface remains responsive.
 
 To maximize compatibility across different media players and video editors, the application prioritizes H.264 (AVC) video and AAC audio formats.
 
