@@ -43,8 +43,7 @@ class DownloadWorker(QRunnable):
             'status_text': 'Analyzing Link...'
         })
         
-        # LAZY IMPORT: By importing yt_dlp here inside the background thread,
-        # the main application window launches instantly (under 0.5s) on startup.
+        # LAZY IMPORT: Keeps application startup instant and lightweight
         import yt_dlp
         
         ffmpeg_path = get_ffmpeg_path()
@@ -57,7 +56,7 @@ class DownloadWorker(QRunnable):
             'no_warnings': True,
             'restrictfilenames': True,
             'nocheckcertificate': True,
-            'noplaylist': True,  # Globally force single video downloads
+            'noplaylist': True,  # Force single video downloads globally
             'retries': 10,
             'fragment_retries': 10,
             'socket_timeout': 30,
@@ -93,10 +92,15 @@ class DownloadWorker(QRunnable):
                     'preferredquality': '192',
                 }]
             elif fmt == "MP4 Video":
+                # Universal Compatibility Strategy:
+                # 1. Prioritize standard H.264 (avc1) video and AAC (mp4a) audio so downloads are instant.
+                # 2. If YouTube only has AV1/VP9/Opus at the requested resolution (like 1440p+),
+                #    recode_video will force FFmpeg to transcode it down to standard H.264/AAC MP4.
                 ydl_opts['format'] = f'bestvideo{height_limit}+bestaudio/best{height_limit}/best'
+                ydl_opts['format_sort'] = ['vcodec:h264', 'acodec:m4a']
                 ydl_opts['merge_output_format'] = 'mp4'
                 ydl_opts['recode_video'] = 'mp4'
-            else:  # Best Quality (Any container)
+            else:  # Best Quality (Will download raw AV1/VP9 inside MKV if that's the absolute best)
                 ydl_opts['format'] = f'bestvideo{height_limit}+bestaudio/best{height_limit}/best'
                 ydl_opts['merge_output_format'] = 'mkv'
 
