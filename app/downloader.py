@@ -1,4 +1,5 @@
 import os
+import yt_dlp  # Moved back to the top-level to ensure PyInstaller compiles it successfully
 from PySide6.QtCore import QRunnable, QObject, Signal
 from .utils import get_ffmpeg_path
 from .logger import log
@@ -43,9 +44,6 @@ class DownloadWorker(QRunnable):
             'status_text': 'Analyzing Link...'
         })
         
-        # LAZY IMPORT: Keeps application startup instant and lightweight
-        import yt_dlp
-        
         ffmpeg_path = get_ffmpeg_path()
         
         # Base options with network retry configurations and safety headers
@@ -56,7 +54,7 @@ class DownloadWorker(QRunnable):
             'no_warnings': True,
             'restrictfilenames': True,
             'nocheckcertificate': True,
-            'noplaylist': True,  # Force single video downloads globally
+            'noplaylist': True,  # Globally force single video downloads
             'retries': 10,
             'fragment_retries': 10,
             'socket_timeout': 30,
@@ -104,7 +102,7 @@ class DownloadWorker(QRunnable):
                 ydl_opts['format'] = f'bestvideo{height_limit}+bestaudio/best{height_limit}/best'
                 ydl_opts['merge_output_format'] = 'mkv'
 
-        # Optional metadata embedding
+        # Optional embedding metadata
         postprocessors = ydl_opts.get('postprocessors', [])
         if self.options.get('embed_metadata') and ffmpeg_path:
             postprocessors.append({'key': 'FFmpegMetadata'})

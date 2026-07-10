@@ -9,13 +9,19 @@ def get_root_dir() -> str:
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def get_ffmpeg_path() -> str:
-    """Returns the absolute path to ffmpeg.exe (local or system path) if it exists."""
-    # 1. Check local tools folder
+    """Returns the absolute path to ffmpeg.exe (bundled, local workspace, or global system path)."""
+    # 1. Check if running inside PyInstaller virtual unpacked environment (_MEIPASS)
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        bundled_path = os.path.join(sys._MEIPASS, "tools", "ffmpeg.exe")
+        if os.path.exists(bundled_path):
+            return bundled_path
+
+    # 2. Check developer workspace tools folder
     local_path = os.path.join(get_root_dir(), "tools", "ffmpeg.exe")
     if os.path.exists(local_path):
         return local_path
     
-    # 2. Check system PATH globally
+    # 3. Check system PATH globally
     system_path = shutil.which('ffmpeg')
     if system_path:
         return system_path
