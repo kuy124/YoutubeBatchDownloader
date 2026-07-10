@@ -1,77 +1,63 @@
 # YouTube Batch Downloader
 
-A lightweight, high-reliability Windows desktop application for batch downloading YouTube videos. This tool processes downloads in the background, keeping the user interface completely responsive. It is designed to be highly resilient against network errors and does not require administrative privileges.
+A lightweight Windows desktop application for downloading YouTube videos in batches. Built with Python, PySide6, and `yt-dlp`, this tool runs downloads in the background to ensure the user interface remains responsive.
+
+To maximize compatibility across different media players and video editors, the application prioritizes H.264 (AVC) video and AAC audio formats.
 
 ---
 
-## Quick Setup Guide
+## Features
+- **Responsive GUI**: Asynchronous multi-threaded downloads prevent the interface from freezing.
+- **Universal Codec Compatibility**: Automatically prioritizes standard H.264 and AAC formats instead of AV1/Opus, ensuring your files play natively on default Windows Media Player and standard video editors.
+- **Auto-Packaging with FFmpeg**: The build system automatically downloads and packages a lightweight FFmpeg binary inside the standalone executable.
+- **Smart Safeguards**: 
+  - Dynamic YouTube Mixes or combined watch-and-playlist links are stripped to single-video downloads to prevent infinite loops.
+  - Safe error reporting if you attempt MP3 downloads without a local or global FFmpeg dependency.
+- **Zero-Registry, Portable Design**: Runs from any directory, USB drive, or folder without requiring administrator privileges.
+
+---
+
+## Quick Start Guide
 
 ### Step 1: Install Python
 The application requires Python 3.11 or newer to run.
 1. Download Python from the [Official Python Downloads Page](https://www.python.org/downloads/).
-2. Run the downloaded installer.
-3. **CRITICAL STEP:** Before clicking "Install Now", make sure to check the box at the bottom that says **"Add python.exe to PATH"**. If you skip this, the installer scripts will fail.
+2. Run the installer and check **"Add python.exe to PATH"** before finishing.
 
-### Step 2: Extract & Install Dependencies
-1. Extract this project folder to your desired location (e.g., your Desktop, a USB drive, etc.).
-2. Double-click the **`install.bat`** file. 
-3. A command window will appear and automatically set up your isolated environment and install the required libraries. This process will create three empty folders: `downloads/`, `logs/`, and `tools/`.
+### Step 2: Install Dependencies
+1. Extract the project folder to your desired path.
+2. Double-click **`install.bat`**. This sets up a localized virtual environment (`venv`), installs libraries, and creates folder structures. If FFmpeg is missing, it automatically downloads a lightweight binary (v4.4.1, ~37MB) from *ffbinaries* into the `tools/` folder.
 
 ### Step 3: Run the Application
-- Once installation finishes, double-click **`run.bat`** to start the downloader GUI.
+- Double-click **`run.bat`** to open the interface.
 
 ---
 
-## Maximizing Quality: Adding FFmpeg (Highly Recommended but Optional)
+## Building a Standalone Executable (`.exe`)
 
-While the application is designed to download videos successfully without any extra tools, YouTube stores high-definition streams (1080p, 1440p, 4K) separately from audio. 
+The build script creates a single executable file that requires no external dependencies, python runtime, or separate FFmpeg installations.
 
-To merge these streams automatically or convert videos to high-quality **MP3s**, you should provide **FFmpeg**:
-
-1. Go to the [FFmpeg Windows Builds page (gyan.dev)](https://www.gyan.dev/ffmpeg/builds/).
-2. Scroll down to the **"release builds"** section and download `ffmpeg-release-essentials.zip`.
-3. Open the downloaded `.zip` file, navigate inside the `bin` folder, and find **`ffmpeg.exe`**.
-4. Copy **`ffmpeg.exe`** and paste it directly into the **`tools/`** folder inside your project directory:
-   ```text
-   YouTubeBatchDownloader/
-   ├── tools/
-   │   └── ffmpeg.exe   <-- Paste here
-   ```
-
-*Note: If `ffmpeg.exe` is missing, the downloader will automatically fall back to downloading pre-merged lower-resolution files (usually up to 720p or 360p depending on availability) so your download never crashes.*
-
----
-
-## How to Use the App
-
-1. **Paste Links:** Copy your target YouTube URLs and paste them into the large text box (one URL per line).
-   * *Note: Playlists are not supported to prevent endless loops. If you paste a playlist link, the downloader will automatically extract and download only the primary video from that link.*
-2. **Select Format & Quality:** 
-   * **Format:** Choose *Best Quality*, *MP4 Video*, or *MP3 Audio* (Defaults to MP3).
-   * **Max Quality:** Choose *Best*, *1080p*, *720p*, or *480p* (Defaults to 480p).
-3. **Deactivated Checkboxes:** Advanced processing choices (merging, thumbnails, metadata) are unchecked by default to maximize speed and stability. Check them only if you have placed `ffmpeg.exe` in the `tools/` folder.
-4. **Download Path:** Click **Browse** to change where files are saved (defaults to the `downloads/` folder in your project directory).
-5. **Download:** Click **Add to Queue and Download**. The process starts immediately, and you can track the exact status, download speed, and ETA in the table.
-6. **Cancel:** Click the **Cancel** button on any active download row to stop it.
-
----
-
-## Advanced: Package into a Standalone `.exe`
-
-If you want to package the application into a single executable file that you can share or run without launch scripts:
 1. Double-click **`build.bat`**.
-2. It will activate the virtual environment and package the app using PyInstaller.
-3. Once completed, your final application, **`YouTubeBatchDownloader.exe`**, will be available inside the **`dist/`** folder.
+2. The script compiles the application using PyInstaller, automatically bundles `tools/ffmpeg.exe`, and outputs **`YouTubeBatchDownloader.exe`** into the newly created **`dist/`** folder.
+3. You can move this single `.exe` to any Windows computer and it will work immediately.
 
 ---
 
-## Troubleshooting & Help
+## Usage & Settings
 
-### The download immediately says "Failed: ..."
-* **Outdated downloader engine:** YouTube regularly changes its platform, which can break older versions of the downloader. Open your terminal in the virtual environment and run `pip install --upgrade yt-dlp` to update it, or delete the `venv` folder and run `install.bat` again.
-* **Age-restricted/Private Videos:** The downloader cannot access videos that require a login, are marked private, or are age-restricted.
+1. **Paste Links**: Enter your YouTube links (one per line) in the text box. Playlist links are automatically processed as single-video downloads to avoid system hangs.
+2. **Download Options**: 
+   - **Format**: Select *Best Quality*, *MP4 Video*, or *MP3 Audio* (Defaults to MP3).
+   - **Max Quality**: Select *Best*, *1080p*, *720p*, or *480p* (Defaults to 480p).
+3. **Download Path**: The application defaults to the `downloads/` directory. You can use the **Browse** button to select another directory.
+4. **Queue Management**: Click **Add to Queue and Download**. Track progress, speed, and ETAs directly from the main status table.
 
-### Where can I find detailed errors?
-If a download fails or behaves unexpectedly, check the log file located at:
-`logs/app.log`
-This text file records startup steps, detailed engine reports, and exact error codes, which are incredibly useful for debugging.
+---
+
+## Troubleshooting
+
+- **How to view detailed errors**: The application outputs debug information and detailed exception reports into `logs/app.log`.
+- **Download says "Failed: FFmpeg required..."**: YouTube does not serve raw MP3 files. It serves `.webm` or `.m4a` files. If you run the script directly and do not have `ffmpeg.exe` in your `tools/` folder or global system PATH, the application will prevent silent `.webm` downloads by failing cleanly. Run `install.bat` or `build.bat` to automatically acquire the binary.
+- **Blocked Requests (HTTP 403 / Forbidden)**: If YouTube blocks standard automated requests, verify your local packages are up to date. Within your command prompt, activate the virtual environment and run:
+  ```cmd
+  pip install --upgrade yt-dlp
