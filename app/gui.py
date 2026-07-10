@@ -3,8 +3,9 @@ import uuid
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                                QLabel, QTextEdit, QPushButton, QComboBox, QCheckBox, 
                                QLineEdit, QFileDialog, QTableWidget, QTableWidgetItem, 
-                               QHeaderView, QProgressBar, QMessageBox)
+                               QHeaderView, QProgressBar, QMessageBox, QApplication)
 from PySide6.QtCore import QThreadPool, Qt
+from PySide6.QtGui import QBrush, QColor
 
 from .settings import Settings
 from .downloader import DownloadWorker
@@ -22,6 +23,7 @@ class MainWindow(QMainWindow):
         
         self.active_workers = {}
         self.row_mapping = {}
+        self.task_data = {}  # Tracks URL and configurations for manual retry loops
 
         self.setup_ui()
         self.apply_settings()
@@ -155,6 +157,12 @@ class MainWindow(QMainWindow):
     def add_task(self, url, options):
         task_id = str(uuid.uuid4())
         
+        # Store metadata for potential retries
+        self.task_data[task_id] = {
+            'url': url,
+            'options': options
+        }
+
         # Add Row to UI Table
         row_idx = self.table.rowCount()
         self.table.insertRow(row_idx)
@@ -197,6 +205,36 @@ class MainWindow(QMainWindow):
                 self.table.item(row, 1).setText("Cancelling...")
                 self.table.cellWidget(row, 5).setEnabled(False)
 
+    def retry_task(self, task_id):
+        row = self.row_mapping.get(task_id)
+        if row is None or task_id not in self.task_data:
+            return
+            
+        task_info = self.task_data[task_id]
+        url = task_info['url']
+        options = task_info['options']
+        
+        # Reset row aesthetics to standard active download state
+        self.table.item(row, 1).setText("Waiting...")
+        self.table.item(row, 1).setForeground(QBrush())  # Reset foreground brush to theme default
+        self.table.cellWidget(row, 2).setValue(0)
+        self.table.item(row, 3).setText("-")
+        self.table.item(row, 4).setText("-")
+        
+        # Recreate and assign the Cancel button for the active process
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.clicked.connect(lambda _, tid=task_id: self.cancel_task(tid))
+        self.table.setCellWidget(row, 5, btn_cancel)
+        
+        # Build and queue the new worker instance
+        worker = DownloadWorker(task_id, url, options)
+        worker.signals.progress.connect(self.update_progress)
+        worker.signals.finished.connect(self.task_finished)
+        worker.signals.error.connect(self.task_error)
+        
+        self.active_workers[task_id] = worker
+        self.threadpool.start(worker)
+
     def update_progress(self, task_id, data):
         row = self.row_mapping.get(task_id)
         if row is None: return
@@ -235,10 +273,14 @@ class MainWindow(QMainWindow):
         row = self.row_mapping.get(task_id)
         if row is not None:
             self.table.item(row, 1).setText(error_msg)
-            self.table.item(row, 1).setForeground(Qt.red)
-            btn = self.table.cellWidget(row, 5)
-            btn.setText("Failed")
-            btn.setEnabled(False)
+            self.table.item(row, 1).setForeground(QBrush(QColor("#d32f2f")))  # Soft red for error text
+            
+            # Replace the Cancel button with a highly visible "Retry" button
+            btn_retry = QPushButton("Retry")
+            btn_retry.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold;")
+            btn_retry.clicked.connect(lambda _, tid=task_id: self.retry_task(tid))
+            self.table.setCellWidget(row, 5, btn_retry)
+            
         self._cleanup_worker(task_id)
 
     def _cleanup_worker(self, task_id):

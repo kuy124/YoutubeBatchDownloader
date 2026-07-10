@@ -1,5 +1,6 @@
 import os
-import yt_dlp  # Moved back to the top-level to ensure PyInstaller compiles it successfully
+import time  # Used for cooling-off pause during automatic retries
+import yt_dlp
 from PySide6.QtCore import QRunnable, QObject, Signal
 from .utils import get_ffmpeg_path
 from .logger import log
@@ -76,7 +77,9 @@ class DownloadWorker(QRunnable):
         if not ffmpeg_path:
             # High-reliability Fallback (No FFmpeg found anywhere)
             if fmt == "MP3 Audio":
-                raise RuntimeError("FFmpeg is missing! Audio cannot be converted to MP3.")
+                # Immediately fail the task gracefully if they choose MP3 without FFmpeg
+                self.signals.error.emit(self.task_id, "Failed: FFmpeg required for MP3.")
+                return
             
             log.warning("FFmpeg not found. Restricting stream requests to pre-merged files to prevent failures.")
             ydl_opts['format'] = f'best{height_limit}/best'
@@ -102,7 +105,7 @@ class DownloadWorker(QRunnable):
                 ydl_opts['format'] = f'bestvideo{height_limit}+bestaudio/best{height_limit}/best'
                 ydl_opts['merge_output_format'] = 'mkv'
 
-        # Optional embedding metadata
+        # Optional metadata embedding
         postprocessors = ydl_opts.get('postprocessors', [])
         if self.options.get('embed_metadata') and ffmpeg_path:
             postprocessors.append({'key': 'FFmpegMetadata'})
@@ -111,42 +114,60 @@ class DownloadWorker(QRunnable):
             postprocessors.append({'key': 'EmbedThumbnail'})
         ydl_opts['postprocessors'] = postprocessors
 
-        try:
-            # 2. Extract metadata quickly using flat-playlist mode
-            extract_opts = ydl_opts.copy()
-            extract_opts['extract_flat'] = 'in_playlist'
-            
-            with yt_dlp.YoutubeDL(extract_opts) as ydl:
-                info = ydl.extract_info(self.url, download=False)
-                title = info.get('title', 'Unknown Title')
-                self.signals.progress.emit(self.task_id, {'title': title, 'status_text': 'Downloading...'})
-            
-            # 3. Perform actual single-video download
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([self.url])
-            
-            if not self.is_cancelled:
-                self.signals.finished.emit(self.task_id)
-
-        except Exception as e:
-            if "CANCELLED_BY_USER" in str(e):
+        # --- Automatic Background Retry Loop ---
+        max_auto_retries = 3
+        for attempt in range(max_auto_retries + 1):
+            if self.is_cancelled:
                 self.signals.error.emit(self.task_id, "Cancelled.")
-                log.info(f"Task {self.task_id} cancelled.")
-            elif "FFmpeg is missing" in str(e):
-                self.signals.error.emit(self.task_id, "Failed: FFmpeg required for MP3.")
-                log.error(f"Task {self.task_id} aborted: FFmpeg missing for MP3 extraction.")
-            else:
-                err_msg = str(e)
-                log.error(f"Error in task {self.task_id}: {err_msg}")
+                return
                 
-                # Friendly error translation
-                if "403" in err_msg or "Forbidden" in err_msg:
-                    friendly_err = "Failed: YouTube blocked request. Try updating yt-dlp."
-                elif "Sign in to confirm" in err_msg or "age" in err_msg:
-                    friendly_err = "Failed: Video is age-restricted or private."
-                elif "not available" in err_msg:
-                    friendly_err = "Failed: Video is private or deleted."
+            try:
+                # 2. Extract metadata quickly using flat-playlist mode
+                extract_opts = ydl_opts.copy()
+                extract_opts['extract_flat'] = 'in_playlist'
+                
+                with yt_dlp.YoutubeDL(extract_opts) as ydl:
+                    info = ydl.extract_info(self.url, download=False)
+                    title = info.get('title', 'Unknown Title')
+                    self.signals.progress.emit(self.task_id, {'title': title, 'status_text': 'Downloading...'})
+                
+                # 3. Perform actual single-video download
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([self.url])
+                
+                # If we successfully executed everything without an error, trigger finished and break
+                if not self.is_cancelled:
+                    self.signals.finished.emit(self.task_id)
+                return
+
+            except Exception as e:
+                # If user manually triggers Cancel, break out of loop immediately
+                if "CANCELLED_BY_USER" in str(e) or self.is_cancelled:
+                    self.signals.error.emit(self.task_id, "Cancelled.")
+                    log.info(f"Task {self.task_id} was cancelled by user.")
+                    return
+                
+                # If we haven't exhausted our auto-retry threshold, perform backoff pause and try again
+                if attempt < max_auto_retries:
+                    log.warning(f"Task {self.task_id} failed on attempt {attempt + 1}. Retrying automatically...")
+                    self.signals.progress.emit(self.task_id, {
+                        'status_text': f'Retrying ({attempt + 1}/3)...'
+                    })
+                    time.sleep(2)  # Safe backoff wait
                 else:
-                    friendly_err = f"Failed: {err_msg[:45]}..."
+                    # Final crash out of automated retry block. Forward final errors to the GUI controller.
+                    err_msg = str(e)
+                    log.error(f"Task {self.task_id} exhausted all auto-retries. Final Error: {err_msg}")
                     
-                self.signals.error.emit(self.task_id, friendly_err)
+                    # Friendly error translation mapping
+                    if "403" in err_msg or "Forbidden" in err_msg:
+                        friendly_err = "Failed: YouTube blocked request. Try updating yt-dlp."
+                    elif "Sign in to confirm" in err_msg or "age" in err_msg:
+                        friendly_err = "Failed: Video is age-restricted or private."
+                    elif "not available" in err_msg:
+                        friendly_err = "Failed: Video is private or deleted."
+                    else:
+                        friendly_err = f"Failed: {err_msg[:45]}..."
+                        
+                    self.signals.error.emit(self.task_id, friendly_err)
+                    return
