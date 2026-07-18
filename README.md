@@ -17,7 +17,7 @@ You can run the application instantly as a standalone program or set it up from 
 
 ### Option A: Download the Standalone Executable
 You do not need to install Python, FFmpeg, or manage command-line dependencies. 
-1. Go to the **Releases / Packages** section on this repository page.
+1. Go to the **Release** section on this repository page.
 2. Download the latest `YouTubeBatchDownloader.exe`.
 3. Move the file to any directory or USB drive and run it. 
    *(This single `.exe` is entirely self-contained and pre-packaged with a lightweight FFmpeg binary).*
