@@ -6,10 +6,10 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                                QLineEdit, QFileDialog, QTableWidget, QTableWidgetItem, 
                                QHeaderView, QProgressBar, QMessageBox, QApplication)
 from PySide6.QtCore import QThreadPool, Qt, QTimer
-from PySide6.QtGui import QBrush, QColor, QIcon
+from PySide6.QtGui import QBrush, QColor, QIcon, QTextCharFormat, QTextCursor
 
 from .settings import Settings
-from .downloader import DownloadWorker
+from .downloader import DownloadWorker, TitlePreviewWorker
 from .logger import log
 from .utils import get_icon_path
 
@@ -32,6 +32,11 @@ class MainWindow(QMainWindow):
         self.row_mapping = {}
         self.task_data = {}        # Tracks URL and configurations for manual retry loops
         self.completed_paths = {}  # Caches output filepaths for instant double-click playback
+        self.active_metrics = {}    # Tracks realtime speed, bytes left, and ETA per worker
+
+        self.preview_timer = QTimer()
+        self.preview_timer.setSingleShot(True)
+        self.preview_timer.timeout.connect(self.fetch_title_previews)
 
         self.setup_ui()
         self.apply_settings()
@@ -45,11 +50,54 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(main_widget)
         layout = QVBoxLayout(main_widget)
 
-        # ---------------- URL Input Area ----------------
-        layout.addWidget(QLabel("<b>URLs (One per line):</b>"))
+        # ---------------- URL Input Search & Title Preview Area ----------------
+        input_search_layout = QHBoxLayout()
+        input_search_layout.addWidget(QLabel("Search Input:"))
+        self.search_url_input = QLineEdit()
+        self.search_url_input.setPlaceholderText("Filter pasted URLs or titles...")
+        self.search_url_input.textChanged.connect(self.search_input_textboxes)
+        input_search_layout.addWidget(self.search_url_input)
+
+        self.lbl_url_matches = QLabel("")
+        input_search_layout.addWidget(self.lbl_url_matches)
+        layout.addLayout(input_search_layout)
+
+        input_container = QHBoxLayout()
+        
+        url_box_layout = QVBoxLayout()
+        self.lbl_url_header = QLabel("<b>URLs (One per line) [0 links]:</b>")
+        url_box_layout.addWidget(self.lbl_url_header)
         self.url_input = QTextEdit()
+        self.url_input.setLineWrapMode(QTextEdit.NoWrap)
         self.url_input.setPlaceholderText("https://www.youtube.com/watch?v=...\nhttps://www.youtube.com/watch?v=...")
-        layout.addWidget(self.url_input)
+        self.url_input.textChanged.connect(self.on_url_input_changed)
+        url_box_layout.addWidget(self.url_input)
+        input_container.addLayout(url_box_layout)
+
+        preview_box_layout = QVBoxLayout()
+        preview_box_layout.addWidget(QLabel("<b>Title Preview:</b>"))
+        self.preview_input = QTextEdit()
+        self.preview_input.setLineWrapMode(QTextEdit.NoWrap)
+        self.preview_input.setReadOnly(True)
+        self.preview_input.setPlaceholderText("Title previews will automatically appear here...")
+        preview_box_layout.addWidget(self.preview_input)
+        input_container.addLayout(preview_box_layout)
+
+        # Standardize fonts, document margins, and paddings for exact pixel line alignment
+        font = self.url_input.font()
+        self.preview_input.setFont(font)
+        self.url_input.document().setDocumentMargin(4)
+        self.preview_input.document().setDocumentMargin(4)
+
+        # Bi-directional scroll synchronization
+        self.url_input.verticalScrollBar().valueChanged.connect(
+            self.preview_input.verticalScrollBar().setValue
+        )
+        self.preview_input.verticalScrollBar().valueChanged.connect(
+            self.url_input.verticalScrollBar().setValue
+        )
+
+        layout.addLayout(input_container)
 
         url_btn_layout = QHBoxLayout()
         btn_paste = QPushButton("Paste Clipboard")
@@ -101,7 +149,7 @@ class MainWindow(QMainWindow):
         btn_browse.clicked.connect(self.browse_folder)
         path_layout.addWidget(btn_browse)
 
-        btn_open_folder = QPushButton("📁 Open Folder")
+        btn_open_folder = QPushButton("Open Folder")
         btn_open_folder.clicked.connect(self.open_downloads_folder)
         path_layout.addWidget(btn_open_folder)
         
@@ -109,20 +157,34 @@ class MainWindow(QMainWindow):
 
         # ---------------- Action Buttons ----------------
         action_layout = QHBoxLayout()
-        btn_download = QPushButton("▶ Add to Queue and Download")
-        btn_download.setMinimumHeight(40)
-        btn_download.setStyleSheet("background-color: #2e7d32; color: white; font-weight: bold;")
+        btn_download = QPushButton("Add to Queue and Download")
+        btn_download.setMinimumHeight(38)
+        btn_download.setStyleSheet("background-color: #1976d2; color: white; font-weight: bold; border-radius: 3px;")
         btn_download.clicked.connect(self.start_downloads)
         action_layout.addWidget(btn_download)
 
-        btn_clear_completed = QPushButton("🧹 Clear Completed")
-        btn_clear_completed.setMinimumHeight(40)
+        btn_cancel_all = QPushButton("Cancel All")
+        btn_cancel_all.setMinimumHeight(38)
+        btn_cancel_all.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold; border-radius: 3px;")
+        btn_cancel_all.clicked.connect(self.cancel_all_tasks)
+        action_layout.addWidget(btn_cancel_all)
+
+        btn_clear_completed = QPushButton("Clear Completed")
+        btn_clear_completed.setMinimumHeight(38)
         btn_clear_completed.clicked.connect(self.clear_completed_tasks)
         action_layout.addWidget(btn_clear_completed)
         
         layout.addLayout(action_layout)
 
-        # ---------------- Queue Table ----------------
+        # ---------------- Search Bar & Queue Table ----------------
+        search_layout = QHBoxLayout()
+        search_layout.addWidget(QLabel("Filter Queue:"))
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Search queue by video title or URL...")
+        self.search_input.textChanged.connect(self.filter_table)
+        search_layout.addWidget(self.search_input)
+        layout.addLayout(search_layout)
+
         self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(["Video Title", "Status", "Progress", "Speed", "ETA", "Actions"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
@@ -247,22 +309,185 @@ class MainWindow(QMainWindow):
         self.global_progress.setValue(avg_progress)
         self.global_progress.setFormat(f"Overall Progress: {avg_progress}%")
 
+    def on_url_input_changed(self):
+        """Updates total link counter and triggers a debounced timer to fetch title previews."""
+        raw_lines = self.url_input.toPlainText().split('\n')
+        valid_links = [line for line in raw_lines if line.strip()]
+        self.lbl_url_header.setText(f"<b>URLs (One per line) [{len(valid_links)} links]:</b>")
+        self.preview_timer.start(600)
+
+    def filter_table(self, query: str):
+        """Filters queue table rows dynamically matching title or URL."""
+        query = query.strip().lower()
+        for row in range(self.table.rowCount()):
+            task_id = None
+            for tid, r_idx in self.row_mapping.items():
+                if r_idx == row:
+                    task_id = tid
+                    break
+            
+            title = self.table.item(row, 0).text() if self.table.item(row, 0) else ""
+            url = self.task_data.get(task_id, {}).get('url', '') if task_id else ""
+            
+            if not query or query in title.lower() or query in url.lower():
+                self.table.setRowHidden(row, False)
+            else:
+                self.table.setRowHidden(row, True)
+
+    def fetch_title_previews(self):
+        raw_lines = self.url_input.toPlainText().split('\n')
+        if not any(line.strip() for line in raw_lines):
+            self.preview_input.clear()
+            return
+
+        worker = TitlePreviewWorker(raw_lines)
+        worker.signals.fetched.connect(self.update_title_previews)
+        self.threadpool.start(worker)
+
+    def update_title_previews(self, previews: list):
+        self.preview_input.setPlainText("\n".join(previews))
+        self.search_input_textboxes()
+
+    def search_input_textboxes(self, query: str = None):
+        """Highlights matching URLs or titles in real-time and displays match counts."""
+        if query is None:
+            query = self.search_url_input.text()
+            
+        query = query.strip().lower()
+        
+        self.url_input.setExtraSelections([])
+        self.preview_input.setExtraSelections([])
+        
+        if not query:
+            self.lbl_url_matches.setText("")
+            return
+
+        fmt = QTextCharFormat()
+        fmt.setBackground(QColor("#fff176"))  # Soft yellow highlight
+        fmt.setForeground(QColor("#000000"))  # Dark text
+
+        url_selections = []
+        preview_selections = []
+        match_count = 0
+        first_match_block = -1
+
+        url_lines = self.url_input.toPlainText().split('\n')
+        preview_lines = self.preview_input.toPlainText().split('\n')
+
+        max_len = max(len(url_lines), len(preview_lines))
+        for idx in range(max_len):
+            u_line = url_lines[idx] if idx < len(url_lines) else ""
+            p_line = preview_lines[idx] if idx < len(preview_lines) else ""
+
+            if (u_line and query in u_line.lower()) or (p_line and query in p_line.lower()):
+                match_count += 1
+                if first_match_block == -1:
+                    first_match_block = idx
+
+                # Highlight line in url_input
+                block_u = self.url_input.document().findBlockByLineNumber(idx)
+                if block_u.isValid():
+                    cursor_u = QTextCursor(block_u)
+                    cursor_u.select(QTextCursor.SelectionType.LineUnderCursor)
+                    sel_u = QTextEdit.ExtraSelection()
+                    sel_u.cursor = cursor_u
+                    sel_u.format = fmt
+                    url_selections.append(sel_u)
+
+                # Highlight line in preview_input
+                block_p = self.preview_input.document().findBlockByLineNumber(idx)
+                if block_p.isValid():
+                    cursor_p = QTextCursor(block_p)
+                    cursor_p.select(QTextCursor.SelectionType.LineUnderCursor)
+                    sel_p = QTextEdit.ExtraSelection()
+                    sel_p.cursor = cursor_p
+                    sel_p.format = fmt
+                    preview_selections.append(sel_p)
+
+        self.url_input.setExtraSelections(url_selections)
+        self.preview_input.setExtraSelections(preview_selections)
+
+        if match_count > 0:
+            self.lbl_url_matches.setText(f"<font color='#2e7d32'><b>{match_count} match{'es' if match_count != 1 else ''} found</b></font>")
+            if first_match_block != -1:
+                block = self.url_input.document().findBlockByLineNumber(first_match_block)
+                if block.isValid():
+                    cursor = QTextCursor(block)
+                    self.url_input.setTextCursor(cursor)
+        else:
+            self.lbl_url_matches.setText("<font color='#d32f2f'><b>No matches found</b></font>")
+
+    def cancel_all_tasks(self):
+        """Cancels all currently active download tasks in batch."""
+        active_ids = list(self.active_workers.keys())
+        for task_id in active_ids:
+            self.cancel_task(task_id)
+
     def update_status_summary(self):
-        """Updates the bottom application status bar metrics."""
+        """Calculates size-based and bandwidth-aware Total ETA including extraction overhead."""
         total = self.table.rowCount()
         active = len(self.active_workers)
         
         completed = 0
         failed = 0
+        queued = 0
         for row in range(total):
             item = self.table.item(row, 1)
             if item:
-                if item.text() == "Complete":
+                status = item.text()
+                if status == "Complete":
                     completed += 1
-                elif "Failed" in item.text():
+                elif "Failed" in status:
                     failed += 1
-                    
-        self.statusBar.showMessage(f"Total Tasks: {total}  |  Active: {active}  |  Completed: {completed}  |  Failed: {failed}")
+                elif status in ["Waiting...", "Analyzing Link..."]:
+                    queued += 1
+
+        # Advanced Speed + File Size + Extraction Overhead Calculation
+        eta_str = "-"
+        if active > 0 or queued > 0:
+            total_active_speed = 0
+            active_bytes_remaining = 0
+            
+            for tid, metrics in list(self.active_metrics.items()):
+                speed = metrics.get('speed_bytes', 0) or 0
+                total_b = metrics.get('total_bytes', 0) or 0
+                done_b = metrics.get('downloaded_bytes', 0) or 0
+                
+                total_active_speed += speed
+                if total_b > done_b:
+                    active_bytes_remaining += (total_b - done_b)
+
+            # Format-based size estimation for queued items (MP3 ~8MB, Video ~40MB)
+            fmt_choice = self.combo_format.currentText()
+            est_size_per_queued = 8 * 1024 * 1024 if fmt_choice == "MP3 Audio" else 40 * 1024 * 1024
+            queued_bytes_remaining = queued * est_size_per_queued
+            
+            total_bytes_remaining = active_bytes_remaining + queued_bytes_remaining
+            
+            # Estimate download time
+            download_time_sec = 0
+            if total_active_speed > 0:
+                download_time_sec = total_bytes_remaining / total_active_speed
+            else:
+                # Fallback to sum of active ETAs if speed metric isn't directly available yet
+                active_etas = [m.get('eta_seconds', 0) for m in self.active_metrics.values() if m.get('eta_seconds')]
+                download_time_sec = max(active_etas) if active_etas else 0
+
+            # Estimate API handshake + FFmpeg metadata extraction overhead (~2.5s per video)
+            EXTRACTION_OVERHEAD_PER_TASK = 2.5
+            total_extraction_time = (active + queued) * EXTRACTION_OVERHEAD_PER_TASK
+            
+            total_estimated_seconds = int(download_time_sec + total_extraction_time)
+            
+            if total_estimated_seconds > 0:
+                mins, secs = divmod(total_estimated_seconds, 60)
+                hours, mins = divmod(mins, 60)
+                if hours > 0:
+                    eta_str = f"{hours:02d}:{mins:02d}:{secs:02d}"
+                else:
+                    eta_str = f"{mins:02d}:{secs:02d}"
+
+        self.statusBar.showMessage(f"Total Tasks: {total}  |  Active: {active}  |  Completed: {completed}  |  Failed: {failed}  |  Total ETA: {eta_str}")
 
     def start_downloads(self):
         urls = [url.strip() for url in self.url_input.toPlainText().split('\n') if url.strip()]
@@ -322,6 +547,7 @@ class MainWindow(QMainWindow):
         
         self.active_workers[task_id] = worker
         self.threadpool.start(worker)
+        self.filter_table(self.search_input.text())
         self.update_status_summary()
         self.update_global_progress()
 
@@ -382,6 +608,8 @@ class MainWindow(QMainWindow):
             del self.active_workers[task_id]
         if task_id in self.completed_paths:
             del self.completed_paths[task_id]
+        if task_id in self.active_metrics:
+            del self.active_metrics[task_id]
             
         # Shift all succeeding task indices down by 1 in mapping dictionary
         for tid, r_idx in list(self.row_mapping.items()):
@@ -433,6 +661,14 @@ class MainWindow(QMainWindow):
             self.table.item(row, 1).setForeground(QBrush(QColor("#2e7d32")))  # Green
             self.table.item(row, 3).setText(data.get('speed', '-'))
             self.table.item(row, 4).setText(data.get('eta', '-'))
+            
+            self.active_metrics[task_id] = {
+                'speed_bytes': data.get('speed_bytes', 0),
+                'downloaded_bytes': data.get('downloaded_bytes', 0),
+                'total_bytes': data.get('total_bytes', 0),
+                'eta_seconds': data.get('eta_seconds', 0)
+            }
+            self.update_status_summary()
 
     def task_finished(self, task_id, file_path):
         row = self.row_mapping.get(task_id)

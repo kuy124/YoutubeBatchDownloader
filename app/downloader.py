@@ -5,6 +5,63 @@ from PySide6.QtCore import QRunnable, QObject, Signal
 from .utils import get_ffmpeg_path
 from .logger import log
 
+class TitlePreviewSignals(QObject):
+    fetched = Signal(list)
+
+from urllib.parse import urlparse, parse_qs
+
+class TitlePreviewWorker(QRunnable):
+    def __init__(self, raw_lines: list):
+        super().__init__()
+        self.raw_lines = raw_lines
+        self.signals = TitlePreviewSignals()
+
+    def _clean_url(self, url: str) -> str:
+        """Strips mix/playlist parameters to ensure single video metadata is fetched."""
+        if "youtube.com/watch" in url and "v=" in url:
+            parsed = urlparse(url)
+            qs = parse_qs(parsed.query)
+            if 'v' in qs:
+                return f"https://www.youtube.com/watch?v={qs['v'][0]}"
+        return url
+
+    def run(self):
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'skip_download': True,
+            'noplaylist': True,
+            'socket_timeout': 10,
+        }
+        previews = []
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            for raw_line in self.raw_lines:
+                line = raw_line.strip()
+                
+                # Maintain 1-to-1 line matching for empty lines
+                if not line:
+                    previews.append("")
+                    continue
+
+                if "youtube.com/" not in line and "youtu.be/" not in line:
+                    previews.append("Invalid URL")
+                    continue
+
+                clean_url = self._clean_url(line)
+                try:
+                    info = ydl.extract_info(clean_url, download=False)
+                    title = info.get('title', 'Unknown Title')
+                    uploader = info.get('artist') or info.get('uploader') or info.get('creator') or info.get('channel')
+                    if uploader and uploader.lower() not in title.lower():
+                        display_title = f"{uploader} - {title}"
+                    else:
+                        display_title = title
+                    previews.append(display_title)
+                except Exception:
+                    previews.append("Failed to load title")
+                    
+        self.signals.fetched.emit(previews)
+
 class DownloadSignals(QObject):
     progress = Signal(str, dict)  # task_id, progress_data
     finished = Signal(str, str)   # task_id, final_filepath (emits file path to open directly)
@@ -30,19 +87,27 @@ class DownloadWorker(QRunnable):
             speed = d.get('_speed_str', '0 KiB/s').replace('\x1b[0;32m', '').replace('\x1b[0m', '').strip()
             eta = d.get('_eta_str', 'Unknown').replace('\x1b[0;33m', '').replace('\x1b[0m', '').strip()
             
-            # SINGLE-PASS OPTIMIZATION: Extract video title dynamically on-the-fly 
-            # from the active downloading stream. This prevents redundant metadata API calls.
+            # Extract video title and author/artist dynamically on-the-fly from active stream
             info_dict = d.get('info_dict', {}) or {}
             title = info_dict.get('title')
+            uploader = info_dict.get('artist') or info_dict.get('uploader') or info_dict.get('creator') or info_dict.get('channel')
             
             data = {
                 'percent': percent,
                 'speed': speed,
+                'speed_bytes': d.get('speed', 0),
+                'downloaded_bytes': d.get('downloaded_bytes', 0),
+                'total_bytes': d.get('total_bytes') or d.get('total_bytes_estimate', 0),
                 'eta': eta,
+                'eta_seconds': d.get('eta'),
                 'filename': d.get('filename', 'Unknown')
             }
             if title:
-                data['title'] = title
+                # Standard Windows Native Music Display: Author - Title
+                if uploader and uploader.lower() not in title.lower():
+                    data['title'] = f"{uploader} - {title}"
+                else:
+                    data['title'] = title
                 
             self.signals.progress.emit(self.task_id, data)
 
@@ -91,18 +156,26 @@ class DownloadWorker(QRunnable):
         
         ffmpeg_path = get_ffmpeg_path()
         
-        # Base options with network retry configurations and safety headers
+        # Output template formatted for Windows Native Music/Media saving format with duplication prevention
         ydl_opts = {
             'outtmpl': os.path.join(self.options['download_path'], '%(title)s.%(ext)s'),
+            'parse_metadata': [
+                'title:^(?P<title>[^-]+)$:%(uploader,artist)s - %(title)s'
+            ],
+            'replace_in_metadata': [
+                ('title', r'^(.+?)\s*-\s*\1\s*-\s*', r'\1 - ')
+            ],
             'progress_hooks': [self.hook],
             'quiet': True,
             'no_warnings': True,
-            'restrictfilenames': True,
             'nocheckcertificate': True,
             'noplaylist': True,  # Globally force single video downloads
             'retries': 10,
             'fragment_retries': 10,
             'socket_timeout': 30,
+            
+            # Embed native metadata (Artist, Title, Album) for Windows File Explorer & Media Player
+            'addmetadata': True,
             
             # PERFORMANCE ENHANCEMENT: Downloads up to 16 stream fragments concurrently (parallel downloading)
             'concurrent_fragment_downloads': 16,
@@ -117,8 +190,7 @@ class DownloadWorker(QRunnable):
         if ffmpeg_path:
             ydl_opts['ffmpeg_location'] = ffmpeg_path
             
-            # PERFORMANCE ENHANCEMENT: Utilize 100% of available CPU cores (-threads 0) 
-            # and configure standard ultra-fast conversion presets for FFmpeg
+            # PERFORMANCE ENHANCEMENT: Utilize 100% of available CPU cores (-threads 0)
             ydl_opts['postprocessor_args'] = {
                 'ffmpeg': ['-threads', '0'],
                 'ffmpegextractaudio': ['-threads', '0'],
@@ -139,26 +211,40 @@ class DownloadWorker(QRunnable):
             log.warning("FFmpeg not found. Restricting stream requests to pre-merged files to prevent failures.")
             ydl_opts['format'] = f'best{height_limit}/best'
         else:
-            # Standard adaptive format downloader (FFmpeg present)
+            # Standard adaptive format downloader with embedded metadata
             if fmt == "MP3 Audio":
                 ydl_opts['format'] = 'bestaudio/best'
-                ydl_opts['postprocessors'] = [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '192',
-                }]
+                ydl_opts['postprocessors'] = [
+                    {
+                        'key': 'FFmpegExtractAudio',
+                        'preferredcodec': 'mp3',
+                        'preferredquality': '192',
+                    },
+                    {
+                        'key': 'FFmpegMetadata',
+                        'add_metadata': True,
+                    }
+                ]
             elif fmt == "MP4 Video":
-                # Universal Compatibility Strategy:
-                # 1. Prioritize standard H.264 (avc1) video and AAC (mp4a) audio so downloads are instant.
-                # 2. If YouTube only has AV1/VP9/Opus at the requested resolution,
-                #    recode_video will force FFmpeg to transcode it down to standard H.264/AAC MP4.
                 ydl_opts['format'] = f'bestvideo{height_limit}+bestaudio/best{height_limit}/best'
                 ydl_opts['format_sort'] = ['vcodec:h264', 'acodec:m4a']
                 ydl_opts['merge_output_format'] = 'mp4'
                 ydl_opts['recode_video'] = 'mp4'
-            else:  # Best Quality (Will download raw AV1/VP9 inside MKV if that's the absolute best)
+                ydl_opts['postprocessors'] = [
+                    {
+                        'key': 'FFmpegMetadata',
+                        'add_metadata': True,
+                    }
+                ]
+            else:  # Best Quality
                 ydl_opts['format'] = f'bestvideo{height_limit}+bestaudio/best{height_limit}/best'
                 ydl_opts['merge_output_format'] = 'mkv'
+                ydl_opts['postprocessors'] = [
+                    {
+                        'key': 'FFmpegMetadata',
+                        'add_metadata': True,
+                    }
+                ]
 
         # --- Automatic Background Retry Loop ---
         max_auto_retries = 3
@@ -169,19 +255,27 @@ class DownloadWorker(QRunnable):
                 return
                 
             try:
-                # SINGLE-PASS PIPELINE OPTIMIZATION: Bypassing the secondary extract_info(download=False)
-                # query completely saves up to 3 seconds of network latency overhead per task download!
+                # Single-pass download execution
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    ydl.download([self.url])
+                    info_dict = ydl.extract_info(self.url, download=True)
                 
-                # If we completed successfully, calculate the final media output filepath and emit
+                # Calculate true destination file path for instant GUI playback
                 if not self.is_cancelled:
-                    final_path = self.final_filename
-                    if final_path:
-                        # Map correct extension if conversion altered it
-                        if fmt == "MP3 Audio" and not final_path.endswith('.mp3'):
+                    final_path = ""
+                    if info_dict:
+                        prepared_path = ydl.prepare_filename(info_dict)
+                        if fmt == "MP3 Audio":
+                            final_path = os.path.splitext(prepared_path)[0] + '.mp3'
+                        elif fmt == "MP4 Video":
+                            final_path = os.path.splitext(prepared_path)[0] + '.mp4'
+                        else:
+                            final_path = prepared_path
+                            
+                    if not final_path or not os.path.exists(final_path):
+                        final_path = self.final_filename
+                        if final_path and fmt == "MP3 Audio" and not final_path.endswith('.mp3'):
                             final_path = os.path.splitext(final_path)[0] + '.mp3'
-                    else:
+                    if not final_path:
                         final_path = self.options['download_path']
                         
                     self.signals.finished.emit(self.task_id, final_path)
@@ -203,7 +297,7 @@ class DownloadWorker(QRunnable):
                     })
                     time.sleep(2)  # Safe backoff wait
                 else:
-                    # Final crash out of automated retry block. Forward final errors to the GUI controller.
+                    # Final crash out of automated retry block. Forward final errors to GUI controller.
                     err_msg = str(e)
                     log.error(f"Task {self.task_id} exhausted all auto-retries. Final Error: {err_msg}")
                     
