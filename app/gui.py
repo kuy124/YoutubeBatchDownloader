@@ -1,12 +1,52 @@
 import os
 import uuid
+import json
+import urllib.request
+import re
+import webbrowser
 import winsound  # Standard library module to trigger clean system chimes
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                                QLabel, QTextEdit, QPushButton, QComboBox, QCheckBox, 
                                QLineEdit, QFileDialog, QTableWidget, QTableWidgetItem, 
                                QHeaderView, QProgressBar, QMessageBox, QApplication)
-from PySide6.QtCore import QThreadPool, Qt, QTimer
+from PySide6.QtCore import QThreadPool, Qt, QTimer, QRunnable, QObject, Signal
 from PySide6.QtGui import QBrush, QColor, QIcon, QTextCharFormat, QTextCursor
+
+APP_VERSION = "v1.5"
+
+def parse_version(ver_str: str) -> tuple:
+    cleaned = re.sub(r'[^0-9.]', '', ver_str)
+    return tuple(map(int, cleaned.split('.'))) if cleaned else (0,)
+
+class UpdateSignals(QObject):
+    update_available = Signal(str, str)
+    no_update = Signal(bool)
+    error = Signal(str)
+
+class UpdateWorker(QRunnable):
+    def __init__(self, current_version: str, manual: bool = False):
+        super().__init__()
+        self.current_version = current_version
+        self.manual = manual
+        self.signals = UpdateSignals()
+
+    def run(self):
+        url = "https://api.github.com/repos/kuy124/YoutubeBatchDownloader/releases/latest"
+        req = urllib.request.Request(url, headers={'User-Agent': 'YouTubeBatchDownloader-App'})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                if resp.status == 200:
+                    data = json.loads(resp.read().decode('utf-8'))
+                    tag_name = data.get('tag_name', '')
+                    html_url = data.get('html_url', 'https://github.com/kuy124/YoutubeBatchDownloader/releases')
+                    
+                    if parse_version(tag_name) > parse_version(self.current_version):
+                        self.signals.update_available.emit(tag_name, html_url)
+                    else:
+                        self.signals.no_update.emit(self.manual)
+        except Exception as e:
+            if self.manual:
+                self.signals.error.emit(str(e))
 
 from .settings import Settings
 from .downloader import DownloadWorker, MetadataWorker, TitlePreviewWorker
@@ -44,6 +84,35 @@ class MainWindow(QMainWindow):
         # Connect the OS clipboard monitor signal
         self.clipboard = QApplication.clipboard()
         self.clipboard.dataChanged.connect(self.on_clipboard_changed)
+
+        # Trigger silent update check on startup
+        QTimer.singleShot(1000, lambda: self.check_for_updates(manual=False))
+
+    def check_for_updates(self, manual: bool = False):
+        worker = UpdateWorker(APP_VERSION, manual=manual)
+        worker.signals.update_available.connect(self.on_update_available)
+        worker.signals.no_update.connect(self.on_no_update)
+        worker.signals.error.connect(self.on_update_error)
+        self.threadpool.start(worker)
+
+    def on_update_available(self, latest_ver: str, url: str):
+        reply = QMessageBox.question(
+            self,
+            "Update Available",
+            f"A new version ({latest_ver}) of YouTube Batch Downloader is available!\n\n"
+            f"Would you like to open GitHub to download the update?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+        )
+        if reply == QMessageBox.Yes:
+            webbrowser.open(url)
+
+    def on_no_update(self, manual: bool):
+        if manual:
+            QMessageBox.information(self, "No Updates", f"You are using the latest version ({APP_VERSION}).")
+
+    def on_update_error(self, err_msg: str):
+        QMessageBox.warning(self, "Update Check Failed", f"Could not check for updates:\n{err_msg}")
 
     def setup_ui(self):
         main_widget = QWidget()
@@ -173,6 +242,11 @@ class MainWindow(QMainWindow):
         btn_clear_completed.setMinimumHeight(38)
         btn_clear_completed.clicked.connect(self.clear_completed_tasks)
         action_layout.addWidget(btn_clear_completed)
+
+        btn_check_update = QPushButton("Check Updates")
+        btn_check_update.setMinimumHeight(38)
+        btn_check_update.clicked.connect(lambda: self.check_for_updates(manual=True))
+        action_layout.addWidget(btn_check_update)
         
         layout.addLayout(action_layout)
 
