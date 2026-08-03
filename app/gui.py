@@ -9,7 +9,7 @@ from PySide6.QtCore import QThreadPool, Qt, QTimer
 from PySide6.QtGui import QBrush, QColor, QIcon, QTextCharFormat, QTextCursor
 
 from .settings import Settings
-from .downloader import DownloadWorker, TitlePreviewWorker
+from .downloader import DownloadWorker, MetadataWorker, TitlePreviewWorker
 from .logger import log
 from .utils import get_icon_path
 
@@ -418,10 +418,65 @@ class MainWindow(QMainWindow):
             self.lbl_url_matches.setText("<font color='#d32f2f'><b>No matches found</b></font>")
 
     def cancel_all_tasks(self):
-        """Cancels all currently active download tasks in batch."""
-        active_ids = list(self.active_workers.keys())
-        for task_id in active_ids:
-            self.cancel_task(task_id)
+        """Smart cancel handler checking for completed tasks and active queue state."""
+        total_rows = len(self.row_mapping)
+        if total_rows == 0:
+            QMessageBox.information(self, "Cancel All", "No downloads in queue.")
+            return
+
+        completed_ids = [
+            tid for tid, row in list(self.row_mapping.items())
+            if self.table.item(row, 1) and self.table.item(row, 1).text() == "Complete"
+        ]
+        
+        active_or_queued_ids = [
+            tid for tid in list(self.row_mapping.keys())
+            if tid not in completed_ids
+        ]
+
+        # Case 1: Completed songs exist
+        if completed_ids:
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("Cancel All Tasks")
+            msg_box.setText("Do you want to delete completed songs/files too?")
+            
+            btn_yes = msg_box.addButton("Yes", QMessageBox.YesRole)
+            btn_no = msg_box.addButton("No (Cancel Active Only)", QMessageBox.NoRole)
+            btn_cancel = msg_box.addButton("Cancel", QMessageBox.RejectRole)
+            
+            msg_box.exec()
+            clicked = msg_box.clickedButton()
+            
+            if clicked == btn_cancel:
+                return
+
+            if clicked == btn_yes:
+                for tid in completed_ids:
+                    file_path = self.completed_paths.get(tid)
+                    if file_path and os.path.exists(file_path):
+                        try:
+                            os.remove(file_path)
+                            log.info(f"Deleted completed file: {file_path}")
+                        except Exception as e:
+                            log.error(f"Failed to delete file {file_path}: {e}")
+                    self.remove_task_row(tid)
+
+            # Cancel running/queued tasks for both 'Yes' and 'No'
+            for task_id in active_or_queued_ids:
+                self.cancel_task(task_id)
+
+        # Case 2: No completed songs exist, but running/queued downloads exist
+        elif active_or_queued_ids:
+            reply = QMessageBox.question(
+                self,
+                "Cancel Running Downloads",
+                "Are you sure you want to cancel the running downloads?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply == QMessageBox.Yes:
+                for task_id in active_or_queued_ids:
+                    self.cancel_task(task_id)
 
     def update_status_summary(self):
         """Calculates size-based and bandwidth-aware Total ETA including extraction overhead."""
@@ -519,8 +574,9 @@ class MainWindow(QMainWindow):
         row_idx = self.table.rowCount()
         self.table.insertRow(row_idx)
         
-        title_item = QTableWidgetItem(f"Queueing: {url}")
-        status_item = QTableWidgetItem("Waiting...")
+        title_item = QTableWidgetItem(f"Extracting: {url}")
+        status_item = QTableWidgetItem("Extracting Metadata...")
+        status_item.setForeground(QBrush(QColor("#1565c0")))
         speed_item = QTableWidgetItem("-")
         eta_item = QTableWidgetItem("-")
         
@@ -539,17 +595,41 @@ class MainWindow(QMainWindow):
         
         self.row_mapping[task_id] = row_idx
 
-        # Initialize and start background worker
-        worker = DownloadWorker(task_id, url, options)
-        worker.signals.progress.connect(self.update_progress)
-        worker.signals.finished.connect(self.task_finished)
-        worker.signals.error.connect(self.task_error)
-        
-        self.active_workers[task_id] = worker
-        self.threadpool.start(worker)
+        # Step 1: Pre-extract metadata first across the queue
+        meta_worker = MetadataWorker(task_id, url)
+        meta_worker.signals.finished.connect(self.on_metadata_extracted)
+        meta_worker.signals.error.connect(lambda tid, err: self.task_error(tid, err))
+        self.threadpool.start(meta_worker)
+
         self.filter_table(self.search_input.text())
         self.update_status_summary()
         self.update_global_progress()
+
+    def on_metadata_extracted(self, task_id, pre_data):
+        """Called when a task's metadata pre-extraction phase completes."""
+        row = self.row_mapping.get(task_id)
+        if row is not None:
+            self.table.item(row, 0).setText(pre_data['title'])
+            self.table.item(row, 1).setText("Waiting in Queue...")
+            self.table.item(row, 1).setForeground(QBrush(QColor("#2e7d32")))
+            
+            ext_time = pre_data.get('extraction_time', 0.0)
+            self.table.item(row, 4).setText(f"{ext_time:.1f}s extract")
+
+        if task_id in self.task_data:
+            self.task_data[task_id]['pre_data'] = pre_data
+            url = self.task_data[task_id]['url']
+            options = self.task_data[task_id]['options']
+
+            # Step 2: Initialize and launch actual download worker
+            worker = DownloadWorker(task_id, url, options, pre_data)
+            worker.signals.progress.connect(self.update_progress)
+            worker.signals.finished.connect(self.task_finished)
+            worker.signals.error.connect(self.task_error)
+            
+            self.active_workers[task_id] = worker
+            self.threadpool.start(worker)
+            self.update_status_summary()
 
     def cancel_task(self, task_id):
         worker = self.active_workers.get(task_id)
@@ -641,11 +721,11 @@ class MainWindow(QMainWindow):
             self.table.item(row, 1).setText(status)
             
             # Dynamic loading status text color indicators
-            if "Analyzing" in status:
+            if "Analyzing" in status or "Extracting" in status:
                 self.table.item(row, 1).setForeground(QBrush(QColor("#1565c0")))  # High-visibility Blue
             elif "Retrying" in status:
                 self.table.item(row, 1).setForeground(QBrush(QColor("#ef6c00")))  # Warning Orange
-            elif "Downloading" in status:
+            elif "Downloading" in status or "Extracted" in status:
                 self.table.item(row, 1).setForeground(QBrush(QColor("#2e7d32")))  # Progress Green
             
         if 'percent' in data:
@@ -660,7 +740,8 @@ class MainWindow(QMainWindow):
             self.table.item(row, 1).setText("Downloading")
             self.table.item(row, 1).setForeground(QBrush(QColor("#2e7d32")))  # Green
             self.table.item(row, 3).setText(data.get('speed', '-'))
-            self.table.item(row, 4).setText(data.get('eta', '-'))
+            if 'eta' in data:
+                self.table.item(row, 4).setText(data['eta'])
             
             self.active_metrics[task_id] = {
                 'speed_bytes': data.get('speed_bytes', 0),

@@ -62,20 +62,77 @@ class TitlePreviewWorker(QRunnable):
                     
         self.signals.fetched.emit(previews)
 
+class MetadataSignals(QObject):
+    finished = Signal(str, dict)  # task_id, metadata_dict
+    error = Signal(str, str)     # task_id, error_msg
+
+class MetadataWorker(QRunnable):
+    """Worker dedicated to pre-extracting song metadata across the entire queue prior to downloading."""
+    def __init__(self, task_id: str, url: str):
+        super().__init__()
+        self.task_id = task_id
+        self.url = url
+        self.signals = MetadataSignals()
+
+    def _clean_url(self, url: str) -> str:
+        if "youtube.com/watch" in url and "v=" in url:
+            parsed = urlparse(url)
+            qs = parse_qs(parsed.query)
+            if 'v' in qs:
+                return f"https://www.youtube.com/watch?v={qs['v'][0]}"
+        return url
+
+    def run(self):
+        t0 = time.time()
+        clean_url = self._clean_url(self.url)
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'skip_download': True,
+            'noplaylist': True,
+            'nocheckcertificate': True,
+            'socket_timeout': 15,
+        }
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(clean_url, download=False)
+                extraction_time = time.time() - t0
+                if info:
+                    title = info.get('title', 'Unknown Title')
+                    uploader = info.get('artist') or info.get('uploader') or info.get('creator') or info.get('channel')
+                    if uploader and uploader.lower() not in title.lower():
+                        display_title = f"{uploader} - {title}"
+                    else:
+                        display_title = title
+                    
+                    file_size = info.get('filesize') or info.get('filesize_approx') or 0
+                    
+                    self.signals.finished.emit(self.task_id, {
+                        'title': display_title,
+                        'file_size': file_size,
+                        'extraction_time': extraction_time
+                    })
+                else:
+                    self.signals.error.emit(self.task_id, "Failed to extract metadata")
+        except Exception as e:
+            self.signals.error.emit(self.task_id, f"Metadata Error: {str(e)[:35]}")
+
 class DownloadSignals(QObject):
     progress = Signal(str, dict)  # task_id, progress_data
     finished = Signal(str, str)   # task_id, final_filepath (emits file path to open directly)
     error = Signal(str, str)
 
 class DownloadWorker(QRunnable):
-    def __init__(self, task_id: str, url: str, options: dict):
+    def __init__(self, task_id: str, url: str, options: dict, pre_data: dict = None):
         super().__init__()
         self.task_id = task_id
         self.url = url
         self.options = options
+        self.pre_data = pre_data or {}
         self.signals = DownloadSignals()
         self.is_cancelled = False
-        self.final_filename = ""  # Captures file destination in real-time
+        self.final_filename = ""
+        self.extraction_time = self.pre_data.get('extraction_time', 0.0)
 
     def hook(self, d):
         if self.is_cancelled:
@@ -92,18 +149,27 @@ class DownloadWorker(QRunnable):
             title = info_dict.get('title')
             uploader = info_dict.get('artist') or info_dict.get('uploader') or info_dict.get('creator') or info_dict.get('channel')
             
+            raw_eta = d.get('eta')
+            total_task_eta_sec = int(raw_eta + self.extraction_time) if raw_eta is not None else None
+            
+            if total_task_eta_sec is not None:
+                mins, secs = divmod(total_task_eta_sec, 60)
+                hours, mins = divmod(mins, 60)
+                formatted_eta = f"{hours:02d}:{mins:02d}:{secs:02d}" if hours > 0 else f"{mins:02d}:{secs:02d}"
+            else:
+                formatted_eta = eta
+
             data = {
                 'percent': percent,
                 'speed': speed,
                 'speed_bytes': d.get('speed', 0),
                 'downloaded_bytes': d.get('downloaded_bytes', 0),
                 'total_bytes': d.get('total_bytes') or d.get('total_bytes_estimate', 0),
-                'eta': eta,
-                'eta_seconds': d.get('eta'),
+                'eta': formatted_eta,
+                'eta_seconds': total_task_eta_sec,
                 'filename': d.get('filename', 'Unknown')
             }
             if title:
-                # Standard Windows Native Music Display: Author - Title
                 if uploader and uploader.lower() not in title.lower():
                     data['title'] = f"{uploader} - {title}"
                 else:
@@ -146,14 +212,15 @@ class DownloadWorker(QRunnable):
             log.error(f"Error during partial file cleanup for {filepath}: {ex}")
 
     def run(self):
-        log.info(f"Starting download task {self.task_id} for URL: {self.url}")
+        log.info(f"Starting stream download task {self.task_id} for URL: {self.url}")
         
-        # 1. Immediate visual feedback
+        # Pre-extracted metadata exists; immediately notify UI and proceed to stream download
+        initial_title = self.pre_data.get('title', 'Preparing stream...')
         self.signals.progress.emit(self.task_id, {
-            'title': 'Extracting metadata...',
-            'status_text': 'Analyzing Link...'
+            'title': initial_title,
+            'status_text': 'Downloading'
         })
-        
+
         ffmpeg_path = get_ffmpeg_path()
         
         # Output template formatted for Windows Native Music/Media saving format with duplication prevention
