@@ -187,7 +187,7 @@ class DownloadWorker(QRunnable):
         self.final_filename = ""
         self.extraction_time = self.pre_data.get('extraction_time', 0.0)
         self.download_start_time = None
-        self.task_start_time = None
+        self.queued_time = self.options.get('queued_time') or time.time()
         self.speed_history = []  # Rolling 15-sample window for smooth Mbps & steady ETA
 
     def post_hook(self, d):
@@ -334,7 +334,6 @@ class DownloadWorker(QRunnable):
             log.error(f"Error during file cleanup: {ex}")
 
     def run(self):
-        self.task_start_time = time.time()
         log.info(f"Starting stream download task {self.task_id} for URL: {self.url}")
         
         # Pre-extracted metadata exists; immediately notify UI and proceed to stream download
@@ -541,7 +540,7 @@ class DownloadWorker(QRunnable):
                     if not final_path:
                         final_path = self.options['download_path']
                         
-                    elapsed_sec = int(time.time() - (self.task_start_time or time.time()))
+                    elapsed_sec = int(time.time() - self.queued_time)
                     mins, secs = divmod(elapsed_sec, 60)
                     if mins > 0:
                         elapsed_str = f"{mins} minute{'s' if mins != 1 else ''} and {secs} second{'s' if secs != 1 else ''}"

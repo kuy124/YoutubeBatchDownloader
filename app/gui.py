@@ -3,6 +3,7 @@ import uuid
 import json
 import urllib.request
 import re
+import time
 import webbrowser
 import winsound  # Standard library module to trigger clean system chimes
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
@@ -12,7 +13,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
 from PySide6.QtCore import QThreadPool, Qt, QTimer, QRunnable, QObject, Signal
 from PySide6.QtGui import QBrush, QColor, QIcon, QTextCharFormat, QTextCursor
 
-APP_VERSION = "v1.6.2"
+APP_VERSION = "v1.6.3"
 
 def parse_version(ver_str: str) -> tuple:
     cleaned = re.sub(r'[^0-9.]', '', ver_str)
@@ -89,6 +90,7 @@ class MainWindow(QMainWindow):
         self.task_data = {}        # Tracks URL and configurations for manual retry loops
         self.completed_paths = {}  # Caches output filepaths for instant double-click playback
         self.active_metrics = {}    # Tracks realtime speed, bytes left, and ETA per worker
+        self.batch_start_time = None
 
         self.preview_timer = QTimer()
         self.preview_timer.setSingleShot(True)
@@ -714,13 +716,15 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Input Error", "Please provide at least one valid URL.")
             return
 
+        self.batch_start_time = time.time()
         os.makedirs(self.entry_path.text(), exist_ok=True)
         self.save_current_settings()
 
         options = {
             'download_path': self.entry_path.text(),
             'format': self.combo_format.currentText(),
-            'quality': self.combo_quality.currentText()
+            'quality': self.combo_quality.currentText(),
+            'queued_time': self.batch_start_time
         }
 
         for idx, url in enumerate(urls):
@@ -979,12 +983,21 @@ class MainWindow(QMainWindow):
         self._cleanup_worker(task_id)
         self.update_status_summary()
         
-        if completion_msg:
-            self.statusBar.showMessage(completion_msg, 8000)
-            
-        # Play system sound notification if all tasks in active queue are complete
+        # Play system sound notification and show total batch duration when all tasks finish
         if len(self.active_workers) == 0:
+            if self.batch_start_time:
+                batch_sec = int(time.time() - self.batch_start_time)
+                b_mins, b_secs = divmod(batch_sec, 60)
+                if b_mins > 0:
+                    b_str = f"{b_mins} minute{'s' if b_mins != 1 else ''} and {b_secs} second{'s' if b_secs != 1 else ''}"
+                else:
+                    b_str = f"{b_secs} second{'s' if b_secs != 1 else ''}"
+                completion_msg = f"Your download completed in {b_str}"
+            
             self.play_finished_sound()
+            
+        if completion_msg:
+            self.statusBar.showMessage(completion_msg, 10000)
             
         log.info(f"Task {task_id} completed: {completion_msg}. Path: {file_path}")
 
