@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
 from PySide6.QtCore import QThreadPool, Qt, QTimer, QRunnable, QObject, Signal
 from PySide6.QtGui import QBrush, QColor, QIcon, QTextCharFormat, QTextCursor
 
-APP_VERSION = "v1.5"
+APP_VERSION = "v1.6"
 
 def parse_version(ver_str: str) -> tuple:
     cleaned = re.sub(r'[^0-9.]', '', ver_str)
