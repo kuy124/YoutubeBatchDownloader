@@ -185,6 +185,8 @@ class DownloadWorker(QRunnable):
         self.is_cancelled = False
         self.final_filename = ""
         self.extraction_time = self.pre_data.get('extraction_time', 0.0)
+        self.download_start_time = None
+        self.speed_history = []  # Rolling 15-sample window for smooth Mbps & steady ETA
 
     def post_hook(self, d):
         if self.is_cancelled:
@@ -195,9 +197,11 @@ class DownloadWorker(QRunnable):
 
         if status == 'started':
             if 'ExtractAudio' in pp_name or 'Audio' in pp_name:
-                status_text = "Converting Audio (MP3)..."
+                status_text = f"Extracting {self.options.get('format', 'Audio')}..."
+            elif 'EmbedThumbnail' in pp_name or 'Thumb' in pp_name:
+                status_text = "Embedding Album Art..."
             elif 'Merger' in pp_name or 'Video' in pp_name:
-                status_text = "Merging Streams (MP4)..."
+                status_text = "Merging Streams..."
             elif 'Metadata' in pp_name:
                 status_text = "Embedding Tags..."
             else:
@@ -222,50 +226,67 @@ class DownloadWorker(QRunnable):
             raise Exception("CANCELLED_BY_USER")
 
         if d['status'] == 'downloading':
+            now = time.time()
+            if self.download_start_time is None:
+                self.download_start_time = now
+
             self.final_filename = d.get('filename', '')
             percent = d.get('_percent_str', '0%').replace('\x1b[0;94m', '').replace('\x1b[0m', '').strip()
-            speed = d.get('_speed_str', '0 KiB/s').replace('\x1b[0;32m', '').replace('\x1b[0m', '').strip()
-            eta = d.get('_eta_str', 'Unknown').replace('\x1b[0;33m', '').replace('\x1b[0m', '').strip()
             
-            # Extract video title and author/artist dynamically on-the-fly from active stream
-            info_dict = d.get('info_dict', {}) or {}
-            title = info_dict.get('title')
-            uploader = info_dict.get('artist') or info_dict.get('uploader') or info_dict.get('creator') or info_dict.get('channel')
-            
-            raw_eta = d.get('eta')
-            total_task_eta_sec = int(raw_eta + self.extraction_time) if raw_eta is not None else None
-            
-            if total_task_eta_sec is not None:
+            # Smooth Mbps & steady ETA calculation via 15-sample moving average
+            instant_speed = d.get('speed', 0) or 0
+            if instant_speed > 0:
+                self.speed_history.append(instant_speed)
+                if len(self.speed_history) > 15:
+                    self.speed_history.pop(0)
+
+            if self.speed_history:
+                smooth_speed = sum(self.speed_history) / len(self.speed_history)
+            else:
+                elapsed = max(0.1, now - self.download_start_time)
+                smooth_speed = d.get('downloaded_bytes', 0) / elapsed
+
+            downloaded_b = d.get('downloaded_bytes', 0)
+            total_b = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
+            remaining_b = max(0, total_b - downloaded_b)
+
+            if smooth_speed > 0 and remaining_b > 0:
+                raw_eta = remaining_b / smooth_speed
+                total_task_eta_sec = int(raw_eta + self.extraction_time)
                 mins, secs = divmod(total_task_eta_sec, 60)
                 hours, mins = divmod(mins, 60)
                 formatted_eta = f"{hours:02d}:{mins:02d}:{secs:02d}" if hours > 0 else f"{mins:02d}:{secs:02d}"
             else:
-                formatted_eta = eta
+                formatted_eta = d.get('_eta_str', 'Unknown').replace('\x1b[0;33m', '').replace('\x1b[0m', '').strip()
+                total_task_eta_sec = None
+
+            # Format smooth speed into MB/s and Mbps
+            mb_s = smooth_speed / (1024 * 1024)
+            mbps = (smooth_speed * 8) / (1024 * 1024)
+            if mb_s >= 1.0:
+                formatted_speed = f"{mb_s:.2f} MB/s ({mbps:.1f} Mbps)"
+            else:
+                formatted_speed = f"{smooth_speed / 1024:.1f} KB/s ({mbps:.2f} Mbps)"
+
+            info_dict = d.get('info_dict', {}) or {}
+            title = info_dict.get('title')
+            uploader = info_dict.get('artist') or info_dict.get('uploader') or info_dict.get('creator') or info_dict.get('channel')
 
             data = {
                 'percent': percent,
-                'speed': speed,
-                'speed_bytes': d.get('speed', 0),
-                'downloaded_bytes': d.get('downloaded_bytes', 0),
-                'total_bytes': d.get('total_bytes') or d.get('total_bytes_estimate', 0),
+                'speed': formatted_speed,
+                'speed_bytes': smooth_speed,
+                'downloaded_bytes': downloaded_b,
+                'total_bytes': total_b,
                 'eta': formatted_eta,
                 'eta_seconds': total_task_eta_sec,
                 'filename': d.get('filename', 'Unknown')
             }
             if title:
                 if uploader and uploader.lower() not in title.lower():
-                    full_title = f"{uploader} - {title}"
+                    data['title'] = f"{uploader} - {title}"
                 else:
-                    full_title = title
-                
-                p_index = info_dict.get('playlist_index')
-                p_count = info_dict.get('n_entries') or info_dict.get('playlist_count')
-                if p_index and p_count:
-                    data['title'] = f"[{p_index}/{min(p_count, 50)}] {full_title}"
-                elif p_index:
-                    data['title'] = f"[{p_index}/50] {full_title}"
-                else:
-                    data['title'] = full_title
+                    data['title'] = title
                 
             self.signals.progress.emit(self.task_id, data)
 
@@ -355,64 +376,96 @@ class DownloadWorker(QRunnable):
         if ffmpeg_path:
             ydl_opts['ffmpeg_location'] = ffmpeg_path
             
-            # FAST MP3 ENCODING & INSTANT STREAM COPY: Disables slow LAME analysis & uses all CPU threads
+            # WINDOWS COMPATIBLE ID3v2.3 TAGS & NATIVE FFmpeg 1:1 SQUARE COVER ART CROPPING
             ydl_opts['postprocessor_args'] = {
-                'ffmpeg': ['-threads', '0', '-preset', 'ultrafast'],
+                'ffmpeg': ['-threads', '0', '-preset', 'ultrafast', '-id3v2_version', '3'],
                 'FFmpegMerger': ['-c:v', 'copy', '-c:a', 'copy', '-movflags', '+faststart'],
-                'FFmpegExtractAudio': ['-threads', '0', '-compression_level', '0'],
-                'ExtractAudio': ['-threads', '0', '-compression_level', '0'],
+                'FFmpegExtractAudio': ['-threads', '0', '-compression_level', '0', '-q:a', '2', '-ac', '2', '-id3v2_version', '3'],
+                'ExtractAudio': ['-threads', '0', '-compression_level', '0', '-q:a', '2', '-ac', '2', '-id3v2_version', '3'],
+                'FFmpegThumbnailsConvertor': ['-vf', 'crop=ih:ih'],  # Natively crops thumbnail to 1:1 square
+                'EmbedThumbnail': ['-id3v2_version', '3'],
                 'FFmpegVideoConvertor': ['-preset', 'ultrafast']
             }
 
         # Setup formats based on choices and local FFmpeg availability
-        fmt = self.options.get('format', 'Best Quality')
+        fmt = self.options.get('format', 'Best Quality (MKV)')
         quality = self.options.get('quality', 'Best')
-        height_limit = f"[height<={quality.replace('p', '')}]" if quality != "Best" else ""
+        q_limit = f"[height<={quality.replace('p', '')}]" if quality != "Best" else ""
 
         if not ffmpeg_path:
-            # High-reliability Fallback (No FFmpeg found anywhere)
-            if fmt == "MP3 Audio":
-                self.signals.error.emit(self.task_id, "Failed: FFmpeg required for MP3.")
+            if "Audio" in fmt:
+                self.signals.error.emit(self.task_id, f"Failed: FFmpeg required for {fmt}.")
                 return
-            
-            log.warning("FFmpeg not found. Restricting stream requests to pre-merged files to prevent failures.")
-            ydl_opts['format'] = f'best{height_limit}/best'
+            log.warning("FFmpeg not found. Restricting stream requests to pre-merged files.")
+            ydl_opts['format'] = f'best{q_limit}/best'
         else:
-            # Standard adaptive format downloader with embedded metadata
+            if "Audio" in fmt:
+                # Enable cover art thumbnail downloading & embedding for all audio files
+                ydl_opts['writethumbnail'] = True
+
             if fmt == "MP3 Audio":
-                # Prefer M4A AAC streams for much faster decoding and MP3 conversion
                 ydl_opts['format'] = 'bestaudio[ext=m4a]/bestaudio/best'
                 ydl_opts['postprocessors'] = [
-                    {
-                        'key': 'FFmpegExtractAudio',
-                        'preferredcodec': 'mp3',
-                        'preferredquality': '192',
-                    },
-                    {
-                        'key': 'FFmpegMetadata',
-                        'add_metadata': True,
-                    }
+                    {'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'},
+                    {'key': 'FFmpegThumbnailsConvertor', 'format': 'jpg'},
+                    {'key': 'EmbedThumbnail', 'already_have_thumbnail': False}
+                ]
+            elif fmt == "M4A Audio":
+                ydl_opts['format'] = 'bestaudio[ext=m4a]/bestaudio/best'
+                ydl_opts['postprocessors'] = [
+                    {'key': 'FFmpegExtractAudio', 'preferredcodec': 'm4a'},
+                    {'key': 'FFmpegThumbnailsConvertor', 'format': 'jpg'},
+                    {'key': 'EmbedThumbnail', 'already_have_thumbnail': False}
+                ]
+            elif fmt == "WAV Audio":
+                ydl_opts['format'] = 'bestaudio/best'
+                ydl_opts['postprocessors'] = [
+                    {'key': 'FFmpegExtractAudio', 'preferredcodec': 'wav'},
+                    {'key': 'FFmpegThumbnailsConvertor', 'format': 'jpg'},
+                    {'key': 'EmbedThumbnail', 'already_have_thumbnail': False}
+                ]
+            elif fmt == "FLAC Audio":
+                ydl_opts['format'] = 'bestaudio/best'
+                ydl_opts['postprocessors'] = [
+                    {'key': 'FFmpegExtractAudio', 'preferredcodec': 'flac'},
+                    {'key': 'FFmpegThumbnailsConvertor', 'format': 'jpg'},
+                    {'key': 'EmbedThumbnail', 'already_have_thumbnail': False}
+                ]
+            elif fmt == "AAC Audio":
+                ydl_opts['format'] = 'bestaudio[ext=m4a]/bestaudio/best'
+                ydl_opts['postprocessors'] = [
+                    {'key': 'FFmpegExtractAudio', 'preferredcodec': 'aac'},
+                    {'key': 'FFmpegThumbnailsConvertor', 'format': 'jpg'},
+                    {'key': 'EmbedThumbnail', 'already_have_thumbnail': False}
+                ]
+            elif fmt == "OPUS Audio":
+                ydl_opts['format'] = 'bestaudio[ext=webm]/bestaudio/best'
+                ydl_opts['postprocessors'] = [
+                    {'key': 'FFmpegExtractAudio', 'preferredcodec': 'opus'},
+                    {'key': 'FFmpegThumbnailsConvertor', 'format': 'jpg'},
+                    {'key': 'EmbedThumbnail', 'already_have_thumbnail': False}
                 ]
             elif fmt == "MP4 Video":
-                ydl_opts['format'] = f'bestvideo{height_limit}+bestaudio/best{height_limit}/best'
+                ydl_opts['format'] = f'bestvideo{q_limit}[ext=mp4]+bestaudio[ext=m4a]/bestvideo{q_limit}+bestaudio/best'
                 ydl_opts['format_sort'] = ['vcodec:h264', 'acodec:m4a']
                 ydl_opts['merge_output_format'] = 'mp4'
-                # Removed 'recode_video' to prevent slow CPU re-encoding; stream copy merges instantly in <1s
-                ydl_opts['postprocessors'] = [
-                    {
-                        'key': 'FFmpegMetadata',
-                        'add_metadata': True,
-                    }
-                ]
-            else:  # Best Quality
-                ydl_opts['format'] = f'bestvideo{height_limit}+bestaudio/best{height_limit}/best'
+                ydl_opts['postprocessors'] = [{'key': 'FFmpegMetadata', 'add_metadata': True}]
+            elif fmt == "WEBM Video":
+                ydl_opts['format'] = f'bestvideo{q_limit}[ext=webm]+bestaudio[ext=webm]/bestvideo{q_limit}+bestaudio/best'
+                ydl_opts['merge_output_format'] = 'webm'
+                ydl_opts['postprocessors'] = [{'key': 'FFmpegMetadata', 'add_metadata': True}]
+            elif fmt == "AVI Video":
+                ydl_opts['format'] = f'bestvideo{q_limit}+bestaudio/best'
+                ydl_opts['merge_output_format'] = 'avi'
+                ydl_opts['postprocessors'] = [{'key': 'FFmpegMetadata', 'add_metadata': True}]
+            elif fmt == "MOV Video":
+                ydl_opts['format'] = f'bestvideo{q_limit}+bestaudio/best'
+                ydl_opts['merge_output_format'] = 'mov'
+                ydl_opts['postprocessors'] = [{'key': 'FFmpegMetadata', 'add_metadata': True}]
+            else:  # Best Quality (MKV)
+                ydl_opts['format'] = f'bestvideo{q_limit}+bestaudio/best'
                 ydl_opts['merge_output_format'] = 'mkv'
-                ydl_opts['postprocessors'] = [
-                    {
-                        'key': 'FFmpegMetadata',
-                        'add_metadata': True,
-                    }
-                ]
+                ydl_opts['postprocessors'] = [{'key': 'FFmpegMetadata', 'add_metadata': True}]
 
         # --- Automatic Background Retry Loop ---
         max_auto_retries = 3
@@ -432,10 +485,13 @@ class DownloadWorker(QRunnable):
                     final_path = ""
                     if info_dict:
                         prepared_path = ydl.prepare_filename(info_dict)
-                        if fmt == "MP3 Audio":
-                            final_path = os.path.splitext(prepared_path)[0] + '.mp3'
-                        elif fmt == "MP4 Video":
-                            final_path = os.path.splitext(prepared_path)[0] + '.mp4'
+                        ext_map = {
+                            "MP3 Audio": ".mp3", "M4A Audio": ".m4a", "WAV Audio": ".wav",
+                            "FLAC Audio": ".flac", "AAC Audio": ".aac", "OPUS Audio": ".opus",
+                            "MP4 Video": ".mp4", "WEBM Video": ".webm", "AVI Video": ".avi", "MOV Video": ".mov"
+                        }
+                        if fmt in ext_map:
+                            final_path = os.path.splitext(prepared_path)[0] + ext_map[fmt]
                         else:
                             final_path = prepared_path
                             

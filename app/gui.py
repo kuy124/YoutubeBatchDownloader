@@ -185,7 +185,19 @@ class MainWindow(QMainWindow):
         opt_v_layout = QVBoxLayout()
         opt_v_layout.addWidget(QLabel("Format:"))
         self.combo_format = QComboBox()
-        self.combo_format.addItems(["Best Quality", "MP4 Video", "MP3 Audio"])
+        self.combo_format.addItems([
+            "Best Quality (MKV)",
+            "MP4 Video",
+            "WEBM Video",
+            "AVI Video",
+            "MOV Video",
+            "MP3 Audio",
+            "M4A Audio",
+            "WAV Audio",
+            "FLAC Audio",
+            "AAC Audio",
+            "OPUS Audio"
+        ])
         opt_v_layout.addWidget(self.combo_format)
         options_layout.addLayout(opt_v_layout)
 
