@@ -8,7 +8,7 @@ import winsound  # Standard library module to trigger clean system chimes
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                                QLabel, QTextEdit, QPushButton, QComboBox, QCheckBox, 
                                QLineEdit, QFileDialog, QTableWidget, QTableWidgetItem, 
-                               QHeaderView, QProgressBar, QMessageBox, QApplication, QScrollBar, QGridLayout, QProgressDialog)
+                               QHeaderView, QProgressBar, QMessageBox, QApplication, QScrollBar, QGridLayout)
 from PySide6.QtCore import QThreadPool, Qt, QTimer, QRunnable, QObject, Signal
 from PySide6.QtGui import QBrush, QColor, QIcon, QTextCharFormat, QTextCursor
 
@@ -19,99 +19,34 @@ def parse_version(ver_str: str) -> tuple:
     return tuple(map(int, cleaned.split('.'))) if cleaned else (0,)
 
 class UpdateSignals(QObject):
-    update_available = Signal(str, str, str)  # sha, commit_msg, html_url
+    update_available = Signal(str, str)
     no_update = Signal(bool)
     error = Signal(str)
 
 class UpdateWorker(QRunnable):
-    def __init__(self, last_commit: str, manual: bool = False):
+    def __init__(self, current_version: str, manual: bool = False):
         super().__init__()
-        self.last_commit = last_commit
+        self.current_version = current_version
         self.manual = manual
         self.signals = UpdateSignals()
 
     def run(self):
-        # Check latest commit from main instead of releases
-        url = "https://api.github.com/repos/kuy124/YoutubeBatchDownloader/commits/main"
+        url = "https://api.github.com/repos/kuy124/YoutubeBatchDownloader/releases/latest"
         req = urllib.request.Request(url, headers={'User-Agent': 'YouTubeBatchDownloader-App'})
         try:
             with urllib.request.urlopen(req, timeout=5) as resp:
                 if resp.status == 200:
                     data = json.loads(resp.read().decode('utf-8'))
-                    sha = data.get('sha', '')
-                    commit_msg = data.get('commit', {}).get('message', 'No commit message').split('\n')[0]
-                    html_url = data.get('html_url', 'https://github.com/kuy124/YoutubeBatchDownloader')
+                    tag_name = data.get('tag_name', '')
+                    html_url = data.get('html_url', 'https://github.com/kuy124/YoutubeBatchDownloader/releases')
                     
-                    # Trigger update if the SHA is different from the one we last saw
-                    if sha and sha != self.last_commit:
-                        self.signals.update_available.emit(sha, commit_msg, html_url)
+                    if parse_version(tag_name) > parse_version(self.current_version):
+                        self.signals.update_available.emit(tag_name, html_url)
                     else:
                         self.signals.no_update.emit(self.manual)
         except Exception as e:
             if self.manual:
                 self.signals.error.emit(str(e))
-
-class AutoUpdateSignals(QObject):
-    progress = Signal(str)
-    finished = Signal(str)
-    error = Signal(str)
-
-class AutoUpdateWorker(QRunnable):
-    def __init__(self):
-        super().__init__()
-        self.signals = AutoUpdateSignals()
-
-    def run(self):
-        import urllib.request
-        import zipfile
-        import tempfile
-        import sys
-        from .utils import get_root_dir
-        
-        try:
-            self.signals.progress.emit("Downloading latest source code...")
-            url = "https://github.com/kuy124/YoutubeBatchDownloader/archive/refs/heads/main.zip"
-            
-            temp_dir = tempfile.mkdtemp(prefix="ybd_update_")
-            zip_path = os.path.join(temp_dir, "update.zip")
-            
-            req = urllib.request.Request(url, headers={'User-Agent': 'YouTubeBatchDownloader-App'})
-            with urllib.request.urlopen(req, timeout=10) as resp, open(zip_path, 'wb') as out_file:
-                out_file.write(resp.read())
-                
-            self.signals.progress.emit("Extracting files...")
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(temp_dir)
-                
-            extracted_folder = os.path.join(temp_dir, "YoutubeBatchDownloader-main")
-            if not os.path.exists(extracted_folder):
-                extracted_folder = temp_dir
-                
-            root_dir = get_root_dir()
-            bat_path = os.path.join(root_dir, "update_and_restart.bat")
-            
-            # Formulate the correct restart command based on runtime environment (Source vs .EXE)
-            if getattr(sys, 'frozen', False):
-                restart_cmd = f'"{sys.executable}"'
-            else:
-                restart_cmd = f'"{sys.executable}" app/main.py'
-            
-            # Create a detached batch script to wait for app to close, replace files, and restart
-            bat_content = f"""@echo off
-TITLE Applying Update...
-echo Installing updates... Please wait.
-timeout /t 2 /nobreak >nul
-xcopy /E /Y /I "{extracted_folder}\\*" "{root_dir}\\"
-rmdir /S /Q "{temp_dir}"
-start "" {restart_cmd}
-del "%~f0"
-"""
-            with open(bat_path, "w") as f:
-                f.write(bat_content)
-                
-            self.signals.finished.emit(bat_path)
-        except Exception as e:
-            self.signals.error.emit(str(e))
 
 from .settings import Settings
 from .downloader import DownloadWorker, MetadataWorker, TitlePreviewWorker
@@ -154,56 +89,27 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(1000, lambda: self.check_for_updates(manual=False))
 
     def check_for_updates(self, manual: bool = False):
-        # Retrieve the last seen commit hash from settings (defaults to empty string if not found)
-        last_commit = self.settings.get("last_commit_sha") or ""
-        worker = UpdateWorker(last_commit, manual=manual)
+        worker = UpdateWorker(APP_VERSION, manual=manual)
         worker.signals.update_available.connect(self.on_update_available)
         worker.signals.no_update.connect(self.on_no_update)
         worker.signals.error.connect(self.on_update_error)
         self.threadpool.start(worker)
 
-    def on_update_available(self, sha: str, commit_msg: str, url: str):
+    def on_update_available(self, latest_ver: str, url: str):
         reply = QMessageBox.question(
             self,
             "Update Available",
-            f"A new update was found!\n\n"
-            f"Latest Change: {commit_msg}\n\n"
-            f"Would you like to automatically download and apply this update now?",
+            f"A new version ({latest_ver}) of YouTube Batch Downloader is available!\n\n"
+            f"Would you like to open GitHub to download the update?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.Yes
         )
-        
-        # Save the new hash to settings.json so we don't spam the user with the same commit on every startup
-        self.settings.set("last_commit_sha", sha)
-        
         if reply == QMessageBox.Yes:
-            self.progress_dialog = QProgressDialog("Preparing update...", None, 0, 0, self)
-            self.progress_dialog.setWindowTitle("Updating Application")
-            self.progress_dialog.setWindowModality(Qt.WindowModal)
-            self.progress_dialog.setCancelButton(None)
-            self.progress_dialog.show()
-            
-            updater = AutoUpdateWorker()
-            updater.signals.progress.connect(self.progress_dialog.setLabelText)
-            updater.signals.finished.connect(self.on_update_ready)
-            updater.signals.error.connect(self.on_update_fail)
-            self.threadpool.start(updater)
-            
-    def on_update_ready(self, bat_path: str):
-        self.progress_dialog.close()
-        import os
-        # Launch the batch script detached from Python
-        os.startfile(bat_path)
-        # Quit the application immediately to free up file locks so the batch file can overwrite them
-        QApplication.quit()
-        
-    def on_update_fail(self, err: str):
-        self.progress_dialog.close()
-        QMessageBox.warning(self, "Update Failed", f"Failed to apply the update automatically:\n{err}")
+            webbrowser.open(url)
 
     def on_no_update(self, manual: bool):
         if manual:
-            QMessageBox.information(self, "No Updates", "Your source code is already synced with the latest GitHub commit.")
+            QMessageBox.information(self, "No Updates", f"You are using the latest version ({APP_VERSION}).")
 
     def on_update_error(self, err_msg: str):
         QMessageBox.warning(self, "Update Check Failed", f"Could not check for updates:\n{err_msg}")
@@ -297,6 +203,12 @@ class MainWindow(QMainWindow):
         self.preview_input.horizontalScrollBar().rangeChanged.connect(sync_preview_h_scrollbar_range)
         self.preview_h_scrollbar.valueChanged.connect(self.preview_input.horizontalScrollBar().setValue)
         self.preview_input.horizontalScrollBar().valueChanged.connect(self.preview_h_scrollbar.setValue)
+
+        # --- Force Initial State Synchronization ---
+        # Prevents the scrollbars from starting with a default 0-99 range (tiny thumb)
+        sync_v_scrollbar_range(self.url_input.verticalScrollBar().minimum(), self.url_input.verticalScrollBar().maximum())
+        sync_url_h_scrollbar_range(self.url_input.horizontalScrollBar().minimum(), self.url_input.horizontalScrollBar().maximum())
+        sync_preview_h_scrollbar_range(self.preview_input.horizontalScrollBar().minimum(), self.preview_input.horizontalScrollBar().maximum())
 
         # --- Force Initial State Synchronization ---
         # Prevents the scrollbars from starting with a default 0-99 range (tiny thumb)
