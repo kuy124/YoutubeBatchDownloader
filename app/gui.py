@@ -8,7 +8,7 @@ import winsound  # Standard library module to trigger clean system chimes
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                                QLabel, QTextEdit, QPushButton, QComboBox, QCheckBox, 
                                QLineEdit, QFileDialog, QTableWidget, QTableWidgetItem, 
-                               QHeaderView, QProgressBar, QMessageBox, QApplication)
+                               QHeaderView, QProgressBar, QMessageBox, QApplication, QScrollBar, QGridLayout)
 from PySide6.QtCore import QThreadPool, Qt, QTimer, QRunnable, QObject, Signal
 from PySide6.QtGui import QBrush, QColor, QIcon, QTextCharFormat, QTextCursor
 
@@ -131,26 +131,43 @@ class MainWindow(QMainWindow):
         input_search_layout.addWidget(self.lbl_url_matches)
         layout.addLayout(input_search_layout)
 
-        input_container = QHBoxLayout()
+        input_grid = QGridLayout()
         
-        url_box_layout = QVBoxLayout()
+        # Row 0: Headers
         self.lbl_url_header = QLabel("<b>URLs (One per line) [0 links]:</b>")
-        url_box_layout.addWidget(self.lbl_url_header)
+        input_grid.addWidget(self.lbl_url_header, 0, 0)
+        
+        lbl_preview_header = QLabel("<b>Title Preview:</b>")
+        input_grid.addWidget(lbl_preview_header, 0, 1)
+        
+        # Row 1: TextBoxes & Vertical Scrollbar
         self.url_input = QTextEdit()
         self.url_input.setLineWrapMode(QTextEdit.NoWrap)
+        self.url_input.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.url_input.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.url_input.setPlaceholderText("https://www.youtube.com/watch?v=...\nhttps://www.youtube.com/watch?v=...")
         self.url_input.textChanged.connect(self.on_url_input_changed)
-        url_box_layout.addWidget(self.url_input)
-        input_container.addLayout(url_box_layout)
-
-        preview_box_layout = QVBoxLayout()
-        preview_box_layout.addWidget(QLabel("<b>Title Preview:</b>"))
+        input_grid.addWidget(self.url_input, 1, 0)
+        
         self.preview_input = QTextEdit()
         self.preview_input.setLineWrapMode(QTextEdit.NoWrap)
         self.preview_input.setReadOnly(True)
+        self.preview_input.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.preview_input.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.preview_input.setPlaceholderText("Title previews will automatically appear here...")
-        preview_box_layout.addWidget(self.preview_input)
-        input_container.addLayout(preview_box_layout)
+        input_grid.addWidget(self.preview_input, 1, 1)
+        
+        self.sync_v_scrollbar = QScrollBar(Qt.Vertical)
+        input_grid.addWidget(self.sync_v_scrollbar, 1, 2)
+        
+        # Row 2: Horizontal Scrollbars
+        self.url_h_scrollbar = QScrollBar(Qt.Horizontal)
+        input_grid.addWidget(self.url_h_scrollbar, 2, 0)
+        
+        self.preview_h_scrollbar = QScrollBar(Qt.Horizontal)
+        input_grid.addWidget(self.preview_h_scrollbar, 2, 1)
+        
+        layout.addLayout(input_grid)
 
         # Standardize fonts, document margins, and paddings for exact pixel line alignment
         font = self.url_input.font()
@@ -158,15 +175,40 @@ class MainWindow(QMainWindow):
         self.url_input.document().setDocumentMargin(4)
         self.preview_input.document().setDocumentMargin(4)
 
-        # Bi-directional scroll synchronization
-        self.url_input.verticalScrollBar().valueChanged.connect(
-            self.preview_input.verticalScrollBar().setValue
-        )
-        self.preview_input.verticalScrollBar().valueChanged.connect(
-            self.url_input.verticalScrollBar().setValue
-        )
+        # --- Synchronize Shared Vertical Scrollbar ---
+        def sync_v_scrollbar_range(min_val, max_val):
+            self.sync_v_scrollbar.setRange(min_val, max_val)
+            self.sync_v_scrollbar.setPageStep(self.url_input.verticalScrollBar().pageStep())
+            
+        self.url_input.verticalScrollBar().rangeChanged.connect(sync_v_scrollbar_range)
+        self.sync_v_scrollbar.valueChanged.connect(self.url_input.verticalScrollBar().setValue)
+        self.sync_v_scrollbar.valueChanged.connect(self.preview_input.verticalScrollBar().setValue)
+        self.url_input.verticalScrollBar().valueChanged.connect(self.sync_v_scrollbar.setValue)
+        self.preview_input.verticalScrollBar().valueChanged.connect(self.sync_v_scrollbar.setValue)
+        
+        # --- Synchronize URL Horizontal Scrollbar ---
+        def sync_url_h_scrollbar_range(min_val, max_val):
+            self.url_h_scrollbar.setRange(min_val, max_val)
+            self.url_h_scrollbar.setPageStep(self.url_input.horizontalScrollBar().pageStep())
+            
+        self.url_input.horizontalScrollBar().rangeChanged.connect(sync_url_h_scrollbar_range)
+        self.url_h_scrollbar.valueChanged.connect(self.url_input.horizontalScrollBar().setValue)
+        self.url_input.horizontalScrollBar().valueChanged.connect(self.url_h_scrollbar.setValue)
+        
+        # --- Synchronize Preview Horizontal Scrollbar ---
+        def sync_preview_h_scrollbar_range(min_val, max_val):
+            self.preview_h_scrollbar.setRange(min_val, max_val)
+            self.preview_h_scrollbar.setPageStep(self.preview_input.horizontalScrollBar().pageStep())
+            
+        self.preview_input.horizontalScrollBar().rangeChanged.connect(sync_preview_h_scrollbar_range)
+        self.preview_h_scrollbar.valueChanged.connect(self.preview_input.horizontalScrollBar().setValue)
+        self.preview_input.horizontalScrollBar().valueChanged.connect(self.preview_h_scrollbar.setValue)
 
-        layout.addLayout(input_container)
+        # --- Force Initial State Synchronization ---
+        # Prevents the scrollbars from starting with a default 0-99 range (tiny thumb)
+        sync_v_scrollbar_range(self.url_input.verticalScrollBar().minimum(), self.url_input.verticalScrollBar().maximum())
+        sync_url_h_scrollbar_range(self.url_input.horizontalScrollBar().minimum(), self.url_input.horizontalScrollBar().maximum())
+        sync_preview_h_scrollbar_range(self.preview_input.horizontalScrollBar().minimum(), self.preview_input.horizontalScrollBar().maximum())
 
         url_btn_layout = QHBoxLayout()
         btn_paste = QPushButton("Paste Clipboard")
