@@ -340,11 +340,13 @@ class DownloadWorker(QRunnable):
         ydl_opts = {
                 'outtmpl': os.path.join(self.options['download_path'], '%(title)s.%(ext)s'),
                 'parse_metadata': [
-                    'title:^(?P<title>[^-]+)$:%(uploader,artist)s - %(title)s'
+                    '%(uploader,artist,creator,channel)s:%(artist)s',
+                    '%(uploader,artist,creator,channel)s:%(album_artist)s'
                 ],
                 'replace_in_metadata': [
                     ('title', r'^(.+?)\s*-\s*\1\s*-\s*', r'\1 - ')
                 ],
+                'addmetadata': True,
                 'progress_hooks': [self.hook],
                 'postprocessor_hooks': [self.post_hook],
                 'quiet': True,
@@ -382,7 +384,8 @@ class DownloadWorker(QRunnable):
                 'FFmpegMerger': ['-c:v', 'copy', '-c:a', 'copy', '-movflags', '+faststart'],
                 'FFmpegExtractAudio': ['-threads', '0', '-compression_level', '0', '-q:a', '2', '-ac', '2', '-id3v2_version', '3'],
                 'ExtractAudio': ['-threads', '0', '-compression_level', '0', '-q:a', '2', '-ac', '2', '-id3v2_version', '3'],
-                'FFmpegThumbnailsConvertor': ['-vf', 'crop=ih:ih'],  # Natively crops thumbnail to 1:1 square
+                'FFmpegMetadata': ['-id3v2_version', '3'],
+                'FFmpegThumbnailsConvertor': ['-vf', 'crop=ih:ih'],
                 'EmbedThumbnail': ['-id3v2_version', '3'],
                 'FFmpegVideoConvertor': ['-preset', 'ultrafast']
             }
@@ -407,6 +410,7 @@ class DownloadWorker(QRunnable):
                 ydl_opts['format'] = 'bestaudio[ext=m4a]/bestaudio/best'
                 ydl_opts['postprocessors'] = [
                     {'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'},
+                    {'key': 'FFmpegMetadata', 'add_metadata': True},
                     {'key': 'FFmpegThumbnailsConvertor', 'format': 'jpg'},
                     {'key': 'EmbedThumbnail', 'already_have_thumbnail': False}
                 ]
@@ -414,6 +418,7 @@ class DownloadWorker(QRunnable):
                 ydl_opts['format'] = 'bestaudio[ext=m4a]/bestaudio/best'
                 ydl_opts['postprocessors'] = [
                     {'key': 'FFmpegExtractAudio', 'preferredcodec': 'm4a'},
+                    {'key': 'FFmpegMetadata', 'add_metadata': True},
                     {'key': 'FFmpegThumbnailsConvertor', 'format': 'jpg'},
                     {'key': 'EmbedThumbnail', 'already_have_thumbnail': False}
                 ]
@@ -421,6 +426,7 @@ class DownloadWorker(QRunnable):
                 ydl_opts['format'] = 'bestaudio/best'
                 ydl_opts['postprocessors'] = [
                     {'key': 'FFmpegExtractAudio', 'preferredcodec': 'wav'},
+                    {'key': 'FFmpegMetadata', 'add_metadata': True},
                     {'key': 'FFmpegThumbnailsConvertor', 'format': 'jpg'},
                     {'key': 'EmbedThumbnail', 'already_have_thumbnail': False}
                 ]
@@ -428,6 +434,7 @@ class DownloadWorker(QRunnable):
                 ydl_opts['format'] = 'bestaudio/best'
                 ydl_opts['postprocessors'] = [
                     {'key': 'FFmpegExtractAudio', 'preferredcodec': 'flac'},
+                    {'key': 'FFmpegMetadata', 'add_metadata': True},
                     {'key': 'FFmpegThumbnailsConvertor', 'format': 'jpg'},
                     {'key': 'EmbedThumbnail', 'already_have_thumbnail': False}
                 ]
@@ -435,6 +442,7 @@ class DownloadWorker(QRunnable):
                 ydl_opts['format'] = 'bestaudio[ext=m4a]/bestaudio/best'
                 ydl_opts['postprocessors'] = [
                     {'key': 'FFmpegExtractAudio', 'preferredcodec': 'aac'},
+                    {'key': 'FFmpegMetadata', 'add_metadata': True},
                     {'key': 'FFmpegThumbnailsConvertor', 'format': 'jpg'},
                     {'key': 'EmbedThumbnail', 'already_have_thumbnail': False}
                 ]
@@ -442,6 +450,7 @@ class DownloadWorker(QRunnable):
                 ydl_opts['format'] = 'bestaudio[ext=webm]/bestaudio/best'
                 ydl_opts['postprocessors'] = [
                     {'key': 'FFmpegExtractAudio', 'preferredcodec': 'opus'},
+                    {'key': 'FFmpegMetadata', 'add_metadata': True},
                     {'key': 'FFmpegThumbnailsConvertor', 'format': 'jpg'},
                     {'key': 'EmbedThumbnail', 'already_have_thumbnail': False}
                 ]
