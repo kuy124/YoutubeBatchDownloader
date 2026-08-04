@@ -47,7 +47,13 @@ class UpdateWorker(QRunnable):
         url = "https://github.com/kuy124/YoutubeBatchDownloader/releases/latest"
         req = urllib.request.Request(url, headers={'User-Agent': random.choice(user_agents)})
         try:
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            import ssl
+            # Bypass SSL certificate verification errors
+            ssl_ctx = ssl.create_default_context()
+            ssl_ctx.check_hostname = False
+            ssl_ctx.verify_mode = ssl.CERT_NONE
+
+            with urllib.request.urlopen(req, timeout=5, context=ssl_ctx) as resp:
                 final_url = resp.geturl()
                 
                 # Extract the tag version directly from the redirected URL

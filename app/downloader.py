@@ -39,10 +39,15 @@ class TitlePreviewWorker(QRunnable):
         import urllib.request
         import urllib.parse
         import json
+        import ssl
         try:
+            ssl_ctx = ssl.create_default_context()
+            ssl_ctx.check_hostname = False
+            ssl_ctx.verify_mode = ssl.CERT_NONE
+
             oembed_url = f"https://www.youtube.com/oembed?url={urllib.parse.quote(clean_url, safe='')}&format=json"
             req = urllib.request.Request(oembed_url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=3) as resp:
+            with urllib.request.urlopen(req, timeout=3, context=ssl_ctx) as resp:
                 if resp.status == 200:
                     data = json.loads(resp.read().decode('utf-8'))
                     title = data.get('title', '')
@@ -119,10 +124,15 @@ class MetadataWorker(QRunnable):
         import urllib.request
         import urllib.parse
         import json
+        import ssl
         try:
+            ssl_ctx = ssl.create_default_context()
+            ssl_ctx.check_hostname = False
+            ssl_ctx.verify_mode = ssl.CERT_NONE
+
             oembed_url = f"https://www.youtube.com/oembed?url={urllib.parse.quote(clean_url, safe='')}&format=json"
             req = urllib.request.Request(oembed_url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=3) as resp:
+            with urllib.request.urlopen(req, timeout=3, context=ssl_ctx) as resp:
                 if resp.status == 200:
                     data = json.loads(resp.read().decode('utf-8'))
                     title = data.get('title', '')
