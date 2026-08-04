@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
 from PySide6.QtCore import QThreadPool, Qt, QTimer, QRunnable, QObject, Signal
 from PySide6.QtGui import QBrush, QColor, QIcon, QTextCharFormat, QTextCursor
 
-APP_VERSION = "v1.6.1"
+APP_VERSION = "v1.6.2"
 
 def parse_version(ver_str: str) -> tuple:
     cleaned = re.sub(r'[^0-9.]', '', ver_str)
@@ -941,7 +941,7 @@ class MainWindow(QMainWindow):
             }
         self.update_status_summary()
 
-    def task_finished(self, task_id, file_path):
+    def task_finished(self, task_id, file_path, completion_msg="", elapsed_str=""):
         row = self.row_mapping.get(task_id)
         if row is None: return  # Safe exit if row was already removed/cancelled
 
@@ -956,7 +956,10 @@ class MainWindow(QMainWindow):
             progress_bar.setFormat("100%")
 
         self.table.item(row, 3).setText("-")
-        self.table.item(row, 4).setText("-")
+        if elapsed_str:
+            self.table.item(row, 4).setText(f"Done in {elapsed_str}")
+        else:
+            self.table.item(row, 4).setText("-")
         
         # Cache file path for double-click playback functionality
         self.completed_paths[task_id] = file_path
@@ -976,11 +979,14 @@ class MainWindow(QMainWindow):
         self._cleanup_worker(task_id)
         self.update_status_summary()
         
+        if completion_msg:
+            self.statusBar.showMessage(completion_msg, 8000)
+            
         # Play system sound notification if all tasks in active queue are complete
         if len(self.active_workers) == 0:
             self.play_finished_sound()
             
-        log.info(f"Task {task_id} completed successfully. Local path: {file_path}")
+        log.info(f"Task {task_id} completed: {completion_msg}. Path: {file_path}")
 
     def task_error(self, task_id, error_msg):
         row = self.row_mapping.get(task_id)

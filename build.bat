@@ -47,9 +47,9 @@ echo [WARNING] icon.ico not found in root. It is highly recommended to place an 
 :: 5. Execute compilation safely and bundle the icon asset as data
 echo Compiling standalone executable with PyInstaller...
 if exist icon.ico (
-    pyinstaller --windowed --onefile --add-data "tools;tools" --add-data "icon.ico;." --collect-all yt_dlp --hidden-import=yt_dlp --exclude-module urllib3.contrib.emscripten --icon icon.ico --name "YouTubeBatchDownloader" app/main.py
+    pyinstaller --windowed --onefile --add-data "tools;tools" --add-data "icon.ico;." --collect-all yt_dlp --collect-all mutagen --hidden-import=yt_dlp --hidden-import=mutagen --exclude-module urllib3.contrib.emscripten --icon icon.ico --name "YouTubeBatchDownloader" app/main.py
 ) else (
-    pyinstaller --windowed --onefile --add-data "tools;tools" --collect-all yt_dlp --hidden-import=yt_dlp --exclude-module urllib3.contrib.emscripten --name "YouTubeBatchDownloader" app/main.py
+    pyinstaller --windowed --onefile --add-data "tools;tools" --collect-all yt_dlp --collect-all mutagen --hidden-import=yt_dlp --hidden-import=mutagen --exclude-module urllib3.contrib.emscripten --name "YouTubeBatchDownloader" app/main.py
 )
 
 echo.

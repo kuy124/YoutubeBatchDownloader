@@ -15,7 +15,7 @@ class Settings:
             "quality": "480p",
             "auto_clear": False,
             "monitor_clipboard": False,  # Clipboard auto-monitor setting
-            "threads": 3
+            "threads": 6
         }
         self.load()
 

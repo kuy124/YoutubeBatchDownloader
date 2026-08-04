@@ -1,5 +1,6 @@
 import os
 import time  # Used for cooling-off pause during automatic retries
+import re
 import yt_dlp
 from PySide6.QtCore import QRunnable, QObject, Signal
 from .utils import get_ffmpeg_path
@@ -171,7 +172,7 @@ class MetadataWorker(QRunnable):
 
 class DownloadSignals(QObject):
     progress = Signal(str, dict)  # task_id, progress_data
-    finished = Signal(str, str)   # task_id, final_filepath (emits file path to open directly)
+    finished = Signal(str, str, str, str)   # task_id, final_filepath, completion_msg, elapsed_str
     error = Signal(str, str)
 
 class DownloadWorker(QRunnable):
@@ -186,6 +187,7 @@ class DownloadWorker(QRunnable):
         self.final_filename = ""
         self.extraction_time = self.pre_data.get('extraction_time', 0.0)
         self.download_start_time = None
+        self.task_start_time = None
         self.speed_history = []  # Rolling 15-sample window for smooth Mbps & steady ETA
 
     def post_hook(self, d):
@@ -291,40 +293,48 @@ class DownloadWorker(QRunnable):
             self.signals.progress.emit(self.task_id, data)
 
     def cleanup_partial_files(self, filepath: str):
-        """Safely removes all incomplete, .part, and fragment files generated during download."""
-        if not filepath:
+        """Safely removes all incomplete, .part, fragment, and thumbnail files when a download is cancelled."""
+        download_dir = self.options.get('download_path') or (os.path.dirname(filepath) if filepath else "")
+        title = self.pre_data.get('title') or ""
+        
+        target_bases = []
+        if filepath:
+            b = os.path.splitext(os.path.basename(filepath))[0]
+            if b and len(b) >= 2:
+                target_bases.append(b)
+        if title and len(title) >= 2:
+            clean_t = re.sub(r'[\\/:*?"<>|]', '_', title)
+            if clean_t not in target_bases:
+                target_bases.append(clean_t)
+
+        if not download_dir or not os.path.exists(download_dir) or not target_bases:
             return
+
         try:
-            # 1. Delete standard .part file
-            part_file = filepath + ".part"
-            if os.path.exists(part_file):
-                os.remove(part_file)
-                log.info(f"Cleanup: Deleted partial file: {part_file}")
-            
-            # 2. Delete the main file path itself if partially written
-            if os.path.exists(filepath):
-                os.remove(filepath)
-                log.info(f"Cleanup: Deleted incomplete file: {filepath}")
-            
-            # 3. Clean up format-specific fragment files (e.g. video.f137.mp4.part, video.f140.m4a.part)
-            dir_name = os.path.dirname(filepath)
-            base_name = os.path.splitext(os.path.basename(filepath))[0]
-            
-            # Safety guard: avoid scanning if base name is abnormally short
-            if not base_name or len(base_name) < 2:
-                return
-                
-            if os.path.exists(dir_name):
-                for f in os.listdir(dir_name):
-                    if f.startswith(base_name) and (f.endswith('.part') or f.endswith('.temp') or f.endswith('.ytdl')):
-                        full_path = os.path.join(dir_name, f)
-                        if os.path.exists(full_path):
-                            os.remove(full_path)
-                            log.info(f"Cleanup: Deleted partial fragment file: {full_path}")
+            for f in os.listdir(download_dir):
+                full_path = os.path.join(download_dir, f)
+                if not os.path.isfile(full_path):
+                    continue
+                    
+                for base in target_bases:
+                    if f.startswith(base):
+                        # Delete ONLY part, temp, fragment, ytdl, and thumbnail files on cancellation
+                        if (
+                            f.endswith('.part') or f.endswith('.temp') or f.endswith('.ytdl') or
+                            f.endswith('.jpg') or f.endswith('.png') or f.endswith('.webp') or
+                            '.f' in f
+                        ):
+                            try:
+                                os.remove(full_path)
+                                log.info(f"Cleanup: Removed cancelled download residue: {full_path}")
+                            except Exception as ex:
+                                log.error(f"Failed removing residue {full_path}: {ex}")
+                        break
         except Exception as ex:
-            log.error(f"Error during partial file cleanup for {filepath}: {ex}")
+            log.error(f"Error during file cleanup: {ex}")
 
     def run(self):
+        self.task_start_time = time.time()
         log.info(f"Starting stream download task {self.task_id} for URL: {self.url}")
         
         # Pre-extracted metadata exists; immediately notify UI and proceed to stream download
@@ -340,8 +350,10 @@ class DownloadWorker(QRunnable):
         ydl_opts = {
                 'outtmpl': os.path.join(self.options['download_path'], '%(title)s.%(ext)s'),
                 'parse_metadata': [
-                    '%(uploader,artist,creator,channel)s:%(artist)s',
-                    '%(uploader,artist,creator,channel)s:%(album_artist)s'
+                    '%(uploader,channel,creator,artist)s:%(artist)s',
+                    '%(uploader,channel,creator,artist)s:%(album_artist)s',
+                    '%(uploader,channel,creator)s:%(composer)s',
+                    '%(title)s:%(album)s'
                 ],
                 'replace_in_metadata': [
                     ('title', r'^(.+?)\s*-\s*\1\s*-\s*', r'\1 - ')
@@ -357,10 +369,9 @@ class DownloadWorker(QRunnable):
                 'fragment_retries': 10,
                 'socket_timeout': 30,
                 
-                # SPEED OPTIMIZATIONS: Skip extra manifests, use 10MB chunk buffer
+                # SPEED OPTIMIZATIONS: Skip extra manifests, full bandwidth streaming
                 'youtube_include_dash_manifest': False,
                 'youtube_include_hls_manifest': False,
-                'http_chunk_size': 10485760,  # 10MB chunk size for higher bandwidth utilization
                 
                 # Embed native metadata (Artist, Title, Album) for Windows File Explorer & Media Player
                 'addmetadata': True,
@@ -378,14 +389,14 @@ class DownloadWorker(QRunnable):
         if ffmpeg_path:
             ydl_opts['ffmpeg_location'] = ffmpeg_path
             
-            # WINDOWS COMPATIBLE ID3v2.3 TAGS & NATIVE FFmpeg 1:1 SQUARE COVER ART CROPPING
+            # UNIVERSAL METADATA MAPPING & ULTRA-FAST MP3 LAME ENCODING
             ydl_opts['postprocessor_args'] = {
-                'ffmpeg': ['-threads', '0', '-preset', 'ultrafast', '-id3v2_version', '3'],
-                'FFmpegMerger': ['-c:v', 'copy', '-c:a', 'copy', '-movflags', '+faststart'],
-                'FFmpegExtractAudio': ['-threads', '0', '-compression_level', '0', '-q:a', '2', '-ac', '2', '-id3v2_version', '3'],
-                'ExtractAudio': ['-threads', '0', '-compression_level', '0', '-q:a', '2', '-ac', '2', '-id3v2_version', '3'],
-                'FFmpegMetadata': ['-id3v2_version', '3'],
-                'FFmpegThumbnailsConvertor': ['-vf', 'crop=ih:ih'],
+                'ffmpeg': ['-threads', '0'],
+                'FFmpegMerger': ['-c:v', 'copy', '-c:a', 'copy', '-map_metadata', '0', '-movflags', '+faststart'],
+                'FFmpegExtractAudio': ['-threads', '0', '-compression_level', '0', '-q:a', '3', '-write_id3v2', '1', '-id3v2_version', '3'],
+                'ExtractAudio': ['-threads', '0', '-compression_level', '0', '-q:a', '3', '-write_id3v2', '1', '-id3v2_version', '3'],
+                'FFmpegMetadata': ['-map_metadata', '0', '-movflags', '+faststart'],
+                'FFmpegThumbnailsConvertor': ['-threads', '0', '-q:v', '2', '-vf', 'crop=ih:ih'],
                 'EmbedThumbnail': ['-id3v2_version', '3'],
                 'FFmpegVideoConvertor': ['-preset', 'ultrafast']
             }
@@ -402,19 +413,17 @@ class DownloadWorker(QRunnable):
             log.warning("FFmpeg not found. Restricting stream requests to pre-merged files.")
             ydl_opts['format'] = f'best{q_limit}/best'
         else:
-            if "Audio" in fmt:
-                # Enable cover art thumbnail downloading & embedding for all audio files
-                ydl_opts['writethumbnail'] = True
-
             if fmt == "MP3 Audio":
-                ydl_opts['format'] = 'bestaudio[ext=m4a]/bestaudio/best'
+                ydl_opts['writethumbnail'] = True
+                ydl_opts['format'] = 'bestaudio[ext=m4a]/bestaudio'
                 ydl_opts['postprocessors'] = [
-                    {'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'},
+                    {'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '0'},
                     {'key': 'FFmpegMetadata', 'add_metadata': True},
                     {'key': 'FFmpegThumbnailsConvertor', 'format': 'jpg'},
                     {'key': 'EmbedThumbnail', 'already_have_thumbnail': False}
                 ]
             elif fmt == "M4A Audio":
+                ydl_opts['writethumbnail'] = True
                 ydl_opts['format'] = 'bestaudio[ext=m4a]/bestaudio/best'
                 ydl_opts['postprocessors'] = [
                     {'key': 'FFmpegExtractAudio', 'preferredcodec': 'm4a'},
@@ -426,11 +435,10 @@ class DownloadWorker(QRunnable):
                 ydl_opts['format'] = 'bestaudio/best'
                 ydl_opts['postprocessors'] = [
                     {'key': 'FFmpegExtractAudio', 'preferredcodec': 'wav'},
-                    {'key': 'FFmpegMetadata', 'add_metadata': True},
-                    {'key': 'FFmpegThumbnailsConvertor', 'format': 'jpg'},
-                    {'key': 'EmbedThumbnail', 'already_have_thumbnail': False}
+                    {'key': 'FFmpegMetadata', 'add_metadata': True}
                 ]
             elif fmt == "FLAC Audio":
+                ydl_opts['writethumbnail'] = True
                 ydl_opts['format'] = 'bestaudio/best'
                 ydl_opts['postprocessors'] = [
                     {'key': 'FFmpegExtractAudio', 'preferredcodec': 'flac'},
@@ -442,11 +450,10 @@ class DownloadWorker(QRunnable):
                 ydl_opts['format'] = 'bestaudio[ext=m4a]/bestaudio/best'
                 ydl_opts['postprocessors'] = [
                     {'key': 'FFmpegExtractAudio', 'preferredcodec': 'aac'},
-                    {'key': 'FFmpegMetadata', 'add_metadata': True},
-                    {'key': 'FFmpegThumbnailsConvertor', 'format': 'jpg'},
-                    {'key': 'EmbedThumbnail', 'already_have_thumbnail': False}
+                    {'key': 'FFmpegMetadata', 'add_metadata': True}
                 ]
             elif fmt == "OPUS Audio":
+                ydl_opts['writethumbnail'] = True
                 ydl_opts['format'] = 'bestaudio[ext=webm]/bestaudio/best'
                 ydl_opts['postprocessors'] = [
                     {'key': 'FFmpegExtractAudio', 'preferredcodec': 'opus'},
@@ -464,11 +471,13 @@ class DownloadWorker(QRunnable):
                 ydl_opts['merge_output_format'] = 'webm'
                 ydl_opts['postprocessors'] = [{'key': 'FFmpegMetadata', 'add_metadata': True}]
             elif fmt == "AVI Video":
-                ydl_opts['format'] = f'bestvideo{q_limit}+bestaudio/best'
+                ydl_opts['format'] = f'bestvideo{q_limit}[ext=mp4]+bestaudio[ext=m4a]/bestvideo{q_limit}+bestaudio/best'
+                ydl_opts['format_sort'] = ['vcodec:h264', 'acodec:m4a']
                 ydl_opts['merge_output_format'] = 'avi'
-                ydl_opts['postprocessors'] = [{'key': 'FFmpegMetadata', 'add_metadata': True}]
+                ydl_opts['postprocessors'] = [{'key': 'FFmpegVideoConvertor', 'preferedformat': 'avi'}, {'key': 'FFmpegMetadata', 'add_metadata': True}]
             elif fmt == "MOV Video":
-                ydl_opts['format'] = f'bestvideo{q_limit}+bestaudio/best'
+                ydl_opts['format'] = f'bestvideo{q_limit}[ext=mp4]+bestaudio[ext=m4a]/bestvideo{q_limit}+bestaudio/best'
+                ydl_opts['format_sort'] = ['vcodec:h264', 'acodec:m4a']
                 ydl_opts['merge_output_format'] = 'mov'
                 ydl_opts['postprocessors'] = [{'key': 'FFmpegMetadata', 'add_metadata': True}]
             else:  # Best Quality (MKV)
@@ -489,6 +498,27 @@ class DownloadWorker(QRunnable):
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info_dict = ydl.extract_info(self.url, download=True)
                 
+                # Remux M4A container to raw .aac with full ID3v2 metadata preservation
+                if fmt == "AAC Audio" and ffmpeg_path and info_dict:
+                    downloaded_file = ydl.prepare_filename(info_dict)
+                    base_path = os.path.splitext(downloaded_file)[0]
+                    aac_path = base_path + '.aac'
+                    if os.path.exists(downloaded_file) and downloaded_file != aac_path:
+                        import subprocess
+                        subprocess.run([
+                            ffmpeg_path, '-y', '-threads', '0',
+                            '-i', downloaded_file,
+                            '-vn', '-c:a', 'copy',
+                            '-map_metadata', '0',
+                            '-write_id3v2', '1',
+                            aac_path
+                        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        if os.path.exists(aac_path):
+                            try:
+                                os.remove(downloaded_file)
+                            except Exception:
+                                pass
+
                 # Calculate true destination file path for instant GUI playback
                 if not self.is_cancelled:
                     final_path = ""
@@ -511,7 +541,15 @@ class DownloadWorker(QRunnable):
                     if not final_path:
                         final_path = self.options['download_path']
                         
-                    self.signals.finished.emit(self.task_id, final_path)
+                    elapsed_sec = int(time.time() - (self.task_start_time or time.time()))
+                    mins, secs = divmod(elapsed_sec, 60)
+                    if mins > 0:
+                        elapsed_str = f"{mins} minute{'s' if mins != 1 else ''} and {secs} second{'s' if secs != 1 else ''}"
+                    else:
+                        elapsed_str = f"{secs} second{'s' if secs != 1 else ''}"
+                    
+                    completion_msg = f"Your download completed in {elapsed_str}"
+                    self.signals.finished.emit(self.task_id, final_path, completion_msg, elapsed_str)
                 return
 
             except Exception as e:
