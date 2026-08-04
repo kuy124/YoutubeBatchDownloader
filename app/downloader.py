@@ -25,41 +25,69 @@ class TitlePreviewWorker(QRunnable):
                 return f"https://www.youtube.com/watch?v={qs['v'][0]}"
         return url
 
-    def run(self):
+    def _fetch_single_title(self, line: str) -> str:
+        line = line.strip()
+        if not line:
+            return ""
+        if "youtube.com/" not in line and "youtu.be/" not in line:
+            return "Invalid URL"
+
+        clean_url = self._clean_url(line)
+
+        # FAST PATH 1: Ultra-fast 50ms YouTube oEmbed JSON API
+        import urllib.request
+        import urllib.parse
+        import json
+        try:
+            oembed_url = f"https://www.youtube.com/oembed?url={urllib.parse.quote(clean_url, safe='')}&format=json"
+            req = urllib.request.Request(oembed_url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                if resp.status == 200:
+                    data = json.loads(resp.read().decode('utf-8'))
+                    title = data.get('title', '')
+                    uploader = data.get('author_name', '')
+                    if title:
+                        if uploader and uploader.lower() not in title.lower():
+                            return f"{uploader} - {title}"
+                        return title
+        except Exception:
+            pass
+
+        # FAST PATH 2: Fallback to lightweight yt-dlp
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
             'skip_download': True,
             'noplaylist': True,
-            'socket_timeout': 10,
+            'socket_timeout': 4,
+            'youtube_include_dash_manifest': False,
+            'youtube_include_hls_manifest': False,
+            'check_formats': False,
         }
-        previews = []
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            for raw_line in self.raw_lines:
-                line = raw_line.strip()
-                
-                # Maintain 1-to-1 line matching for empty lines
-                if not line:
-                    previews.append("")
-                    continue
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(clean_url, download=False)
+                if not info:
+                    return "Failed to load title"
+                title = info.get('title', 'Unknown Title')
+                uploader = info.get('artist') or info.get('uploader') or info.get('creator') or info.get('channel')
+                if uploader and uploader.lower() not in title.lower():
+                    return f"{uploader} - {title}"
+                return title
+        except Exception:
+            return "Failed to load title"
 
-                if "youtube.com/" not in line and "youtu.be/" not in line:
-                    previews.append("Invalid URL")
-                    continue
+    def run(self):
+        if not self.raw_lines:
+            self.signals.fetched.emit([])
+            return
 
-                clean_url = self._clean_url(line)
-                try:
-                    info = ydl.extract_info(clean_url, download=False)
-                    title = info.get('title', 'Unknown Title')
-                    uploader = info.get('artist') or info.get('uploader') or info.get('creator') or info.get('channel')
-                    if uploader and uploader.lower() not in title.lower():
-                        display_title = f"{uploader} - {title}"
-                    else:
-                        display_title = title
-                    previews.append(display_title)
-                except Exception:
-                    previews.append("Failed to load title")
-                    
+        import concurrent.futures
+        # Fetch all link titles concurrently in parallel
+        max_workers = min(12, len(self.raw_lines))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            previews = list(executor.map(self._fetch_single_title, self.raw_lines))
+
         self.signals.fetched.emit(previews)
 
 class MetadataSignals(QObject):
@@ -85,13 +113,42 @@ class MetadataWorker(QRunnable):
     def run(self):
         t0 = time.time()
         clean_url = self._clean_url(self.url)
+
+        # FAST PATH 1: Ultra-fast 50ms YouTube oEmbed JSON API
+        import urllib.request
+        import urllib.parse
+        import json
+        try:
+            oembed_url = f"https://www.youtube.com/oembed?url={urllib.parse.quote(clean_url, safe='')}&format=json"
+            req = urllib.request.Request(oembed_url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                if resp.status == 200:
+                    data = json.loads(resp.read().decode('utf-8'))
+                    title = data.get('title', '')
+                    uploader = data.get('author_name', '')
+                    if title:
+                        display_title = f"{uploader} - {title}" if uploader and uploader.lower() not in title.lower() else title
+                        extraction_time = time.time() - t0
+                        self.signals.finished.emit(self.task_id, {
+                            'title': display_title,
+                            'file_size': 0,
+                            'extraction_time': extraction_time
+                        })
+                        return
+        except Exception:
+            pass
+
+        # FAST PATH 2: Fallback to yt-dlp
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
             'skip_download': True,
             'noplaylist': True,
             'nocheckcertificate': True,
-            'socket_timeout': 15,
+            'socket_timeout': 5,
+            'youtube_include_dash_manifest': False,
+            'youtube_include_hls_manifest': False,
+            'check_formats': False,
         }
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -100,13 +157,8 @@ class MetadataWorker(QRunnable):
                 if info:
                     title = info.get('title', 'Unknown Title')
                     uploader = info.get('artist') or info.get('uploader') or info.get('creator') or info.get('channel')
-                    if uploader and uploader.lower() not in title.lower():
-                        display_title = f"{uploader} - {title}"
-                    else:
-                        display_title = title
-                    
+                    display_title = f"{uploader} - {title}" if uploader and uploader.lower() not in title.lower() else title
                     file_size = info.get('filesize') or info.get('filesize_approx') or 0
-                    
                     self.signals.finished.emit(self.task_id, {
                         'title': display_title,
                         'file_size': file_size,
@@ -133,6 +185,37 @@ class DownloadWorker(QRunnable):
         self.is_cancelled = False
         self.final_filename = ""
         self.extraction_time = self.pre_data.get('extraction_time', 0.0)
+
+    def post_hook(self, d):
+        if self.is_cancelled:
+            raise Exception("CANCELLED_BY_USER")
+
+        status = d.get('status')
+        pp_name = d.get('postprocessor', '')
+
+        if status == 'started':
+            if 'ExtractAudio' in pp_name or 'Audio' in pp_name:
+                status_text = "Converting Audio (MP3)..."
+            elif 'Merger' in pp_name or 'Video' in pp_name:
+                status_text = "Merging Streams (MP4)..."
+            elif 'Metadata' in pp_name:
+                status_text = "Embedding Tags..."
+            else:
+                status_text = "Extracting Local File..."
+
+            self.signals.progress.emit(self.task_id, {
+                'status_text': status_text,
+                'is_postprocessing': True,
+                'speed': 'Processing...',
+                'eta': 'Almost done'
+            })
+        elif status == 'finished':
+            self.signals.progress.emit(self.task_id, {
+                'status_text': "Finalizing File...",
+                'is_postprocessing': True,
+                'speed': '-',
+                'eta': '00:00'
+            })
 
     def hook(self, d):
         if self.is_cancelled:
@@ -171,9 +254,18 @@ class DownloadWorker(QRunnable):
             }
             if title:
                 if uploader and uploader.lower() not in title.lower():
-                    data['title'] = f"{uploader} - {title}"
+                    full_title = f"{uploader} - {title}"
                 else:
-                    data['title'] = title
+                    full_title = title
+                
+                p_index = info_dict.get('playlist_index')
+                p_count = info_dict.get('n_entries') or info_dict.get('playlist_count')
+                if p_index and p_count:
+                    data['title'] = f"[{p_index}/{min(p_count, 50)}] {full_title}"
+                elif p_index:
+                    data['title'] = f"[{p_index}/50] {full_title}"
+                else:
+                    data['title'] = full_title
                 
             self.signals.progress.emit(self.task_id, data)
 
@@ -225,27 +317,33 @@ class DownloadWorker(QRunnable):
         
         # Output template formatted for Windows Native Music/Media saving format with duplication prevention
         ydl_opts = {
-            'outtmpl': os.path.join(self.options['download_path'], '%(title)s.%(ext)s'),
-            'parse_metadata': [
-                'title:^(?P<title>[^-]+)$:%(uploader,artist)s - %(title)s'
-            ],
-            'replace_in_metadata': [
-                ('title', r'^(.+?)\s*-\s*\1\s*-\s*', r'\1 - ')
-            ],
-            'progress_hooks': [self.hook],
-            'quiet': True,
-            'no_warnings': True,
-            'nocheckcertificate': True,
-            'noplaylist': True,  # Globally force single video downloads
-            'retries': 10,
-            'fragment_retries': 10,
-            'socket_timeout': 30,
-            
-            # Embed native metadata (Artist, Title, Album) for Windows File Explorer & Media Player
-            'addmetadata': True,
-            
-            # PERFORMANCE ENHANCEMENT: Downloads up to 16 stream fragments concurrently (parallel downloading)
-            'concurrent_fragment_downloads': 16,
+                'outtmpl': os.path.join(self.options['download_path'], '%(title)s.%(ext)s'),
+                'parse_metadata': [
+                    'title:^(?P<title>[^-]+)$:%(uploader,artist)s - %(title)s'
+                ],
+                'replace_in_metadata': [
+                    ('title', r'^(.+?)\s*-\s*\1\s*-\s*', r'\1 - ')
+                ],
+                'progress_hooks': [self.hook],
+                'postprocessor_hooks': [self.post_hook],
+                'quiet': True,
+                'no_warnings': True,
+                'nocheckcertificate': True,
+                'noplaylist': True,  # Globally force single video downloads
+                'retries': 10,
+                'fragment_retries': 10,
+                'socket_timeout': 30,
+                
+                # SPEED OPTIMIZATIONS: Skip extra manifests, use 10MB chunk buffer
+                'youtube_include_dash_manifest': False,
+                'youtube_include_hls_manifest': False,
+                'http_chunk_size': 10485760,  # 10MB chunk size for higher bandwidth utilization
+                
+                # Embed native metadata (Artist, Title, Album) for Windows File Explorer & Media Player
+                'addmetadata': True,
+                
+                # PERFORMANCE ENHANCEMENT: Downloads up to 16 stream fragments concurrently (parallel downloading)
+                'concurrent_fragment_downloads': 16,
             
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -257,11 +355,13 @@ class DownloadWorker(QRunnable):
         if ffmpeg_path:
             ydl_opts['ffmpeg_location'] = ffmpeg_path
             
-            # PERFORMANCE ENHANCEMENT: Utilize 100% of available CPU cores (-threads 0)
+            # FAST MP3 ENCODING & INSTANT STREAM COPY: Disables slow LAME analysis & uses all CPU threads
             ydl_opts['postprocessor_args'] = {
-                'ffmpeg': ['-threads', '0'],
-                'ffmpegextractaudio': ['-threads', '0'],
-                'ffmpegvideoconvertor': ['-threads', '0', '-preset', 'ultrafast']
+                'ffmpeg': ['-threads', '0', '-preset', 'ultrafast'],
+                'FFmpegMerger': ['-c:v', 'copy', '-c:a', 'copy', '-movflags', '+faststart'],
+                'FFmpegExtractAudio': ['-threads', '0', '-compression_level', '0'],
+                'ExtractAudio': ['-threads', '0', '-compression_level', '0'],
+                'FFmpegVideoConvertor': ['-preset', 'ultrafast']
             }
 
         # Setup formats based on choices and local FFmpeg availability
@@ -280,7 +380,8 @@ class DownloadWorker(QRunnable):
         else:
             # Standard adaptive format downloader with embedded metadata
             if fmt == "MP3 Audio":
-                ydl_opts['format'] = 'bestaudio/best'
+                # Prefer M4A AAC streams for much faster decoding and MP3 conversion
+                ydl_opts['format'] = 'bestaudio[ext=m4a]/bestaudio/best'
                 ydl_opts['postprocessors'] = [
                     {
                         'key': 'FFmpegExtractAudio',
@@ -296,7 +397,7 @@ class DownloadWorker(QRunnable):
                 ydl_opts['format'] = f'bestvideo{height_limit}+bestaudio/best{height_limit}/best'
                 ydl_opts['format_sort'] = ['vcodec:h264', 'acodec:m4a']
                 ydl_opts['merge_output_format'] = 'mp4'
-                ydl_opts['recode_video'] = 'mp4'
+                # Removed 'recode_video' to prevent slow CPU re-encoding; stream copy merges instantly in <1s
                 ydl_opts['postprocessors'] = [
                     {
                         'key': 'FFmpegMetadata',

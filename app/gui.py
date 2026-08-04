@@ -619,7 +619,21 @@ class MainWindow(QMainWindow):
         self.statusBar.showMessage(f"Total Tasks: {total}  |  Active: {active}  |  Completed: {completed}  |  Failed: {failed}  |  Total ETA: {eta_str}")
 
     def start_downloads(self):
-        urls = [url.strip() for url in self.url_input.toPlainText().split('\n') if url.strip()]
+        raw_url_lines = self.url_input.toPlainText().split('\n')
+        raw_preview_lines = self.preview_input.toPlainText().split('\n')
+        
+        urls = []
+        previews = []
+        for i, line in enumerate(raw_url_lines):
+            u = line.strip()
+            if u:
+                urls.append(u)
+                p = raw_preview_lines[i].strip() if i < len(raw_preview_lines) else ""
+                if p and p not in ["Failed to load title", "Invalid URL"]:
+                    previews.append(p)
+                else:
+                    previews.append(None)
+
         if not urls:
             QMessageBox.warning(self, "Input Error", "Please provide at least one valid URL.")
             return
@@ -633,10 +647,11 @@ class MainWindow(QMainWindow):
             'quality': self.combo_quality.currentText()
         }
 
-        for url in urls:
-            self.add_task(url, options)
+        for idx, url in enumerate(urls):
+            cached_title = previews[idx]
+            self.add_task(url, options, title=cached_title)
 
-    def add_task(self, url, options):
+    def add_task(self, url, options, title=None):
         task_id = str(uuid.uuid4())
         
         self.task_data[task_id] = {
@@ -648,9 +663,13 @@ class MainWindow(QMainWindow):
         row_idx = self.table.rowCount()
         self.table.insertRow(row_idx)
         
-        title_item = QTableWidgetItem(f"Extracting: {url}")
-        status_item = QTableWidgetItem("Extracting Metadata...")
-        status_item.setForeground(QBrush(QColor("#1565c0")))
+        display_title = title if title else f"Extracting: {url}"
+        status_text = "Waiting in Queue..." if title else "Extracting Metadata..."
+        status_color = "#2e7d32" if title else "#1565c0"
+
+        title_item = QTableWidgetItem(display_title)
+        status_item = QTableWidgetItem(status_text)
+        status_item.setForeground(QBrush(QColor(status_color)))
         speed_item = QTableWidgetItem("-")
         eta_item = QTableWidgetItem("-")
         
@@ -669,11 +688,23 @@ class MainWindow(QMainWindow):
         
         self.row_mapping[task_id] = row_idx
 
-        # Step 1: Pre-extract metadata first across the queue
-        meta_worker = MetadataWorker(task_id, url)
-        meta_worker.signals.finished.connect(self.on_metadata_extracted)
-        meta_worker.signals.error.connect(lambda tid, err: self.task_error(tid, err))
-        self.threadpool.start(meta_worker)
+        if title:
+            # Instant start: use pre-fetched title preview directly
+            pre_data = {'title': title}
+            self.task_data[task_id]['pre_data'] = pre_data
+            worker = DownloadWorker(task_id, url, options, pre_data)
+            worker.signals.progress.connect(self.update_progress)
+            worker.signals.finished.connect(self.task_finished)
+            worker.signals.error.connect(self.task_error)
+            
+            self.active_workers[task_id] = worker
+            self.threadpool.start(worker)
+        else:
+            # Step 1: Pre-extract metadata first across queue
+            meta_worker = MetadataWorker(task_id, url)
+            meta_worker.signals.finished.connect(self.on_metadata_extracted)
+            meta_worker.signals.error.connect(lambda tid, err: self.task_error(tid, err))
+            self.threadpool.start(meta_worker)
 
         self.filter_table(self.search_input.text())
         self.update_status_summary()
@@ -795,35 +826,44 @@ class MainWindow(QMainWindow):
             self.table.item(row, 1).setText(status)
             
             # Dynamic loading status text color indicators
-            if "Analyzing" in status or "Extracting" in status:
-                self.table.item(row, 1).setForeground(QBrush(QColor("#1565c0")))  # High-visibility Blue
+            if "Analyzing" in status or "Extracting" in status or "Converting" in status or "Merging" in status or "Embedding" in status:
+                self.table.item(row, 1).setForeground(QBrush(QColor("#8e24aa")))  # Extraction Purple
             elif "Retrying" in status:
                 self.table.item(row, 1).setForeground(QBrush(QColor("#ef6c00")))  # Warning Orange
             elif "Downloading" in status or "Extracted" in status:
                 self.table.item(row, 1).setForeground(QBrush(QColor("#2e7d32")))  # Progress Green
+
+        # Switch progress bar between Download % and Animated Extraction Pulse
+        progress_bar = self.table.cellWidget(row, 2)
+        if isinstance(progress_bar, QProgressBar):
+            if data.get('is_postprocessing'):
+                progress_bar.setRange(0, 0)  # Indeterminate animated pulse mode
+                progress_bar.setFormat("Extracting...")
+            else:
+                progress_bar.setRange(0, 100)
+                if 'percent' in data:
+                    perc_str = data['percent'].replace('%', '')
+                    try:
+                        perc = float(perc_str)
+                        progress_bar.setValue(int(perc))
+                        progress_bar.setFormat("%p%")
+                        self.update_global_progress()
+                    except ValueError:
+                        pass
             
-        if 'percent' in data:
-            perc_str = data['percent'].replace('%', '')
-            try:
-                perc = float(perc_str)
-                self.table.cellWidget(row, 2).setValue(int(perc))
-                self.update_global_progress()  # Recalculate global average on every chunk download
-            except ValueError:
-                pass
-            
-            self.table.item(row, 1).setText("Downloading")
-            self.table.item(row, 1).setForeground(QBrush(QColor("#2e7d32")))  # Green
-            self.table.item(row, 3).setText(data.get('speed', '-'))
-            if 'eta' in data:
-                self.table.item(row, 4).setText(data['eta'])
-            
+        if 'speed' in data:
+            self.table.item(row, 3).setText(data['speed'])
+        if 'eta' in data:
+            self.table.item(row, 4).setText(data['eta'])
+        
+        if not data.get('is_postprocessing'):
             self.active_metrics[task_id] = {
                 'speed_bytes': data.get('speed_bytes', 0),
                 'downloaded_bytes': data.get('downloaded_bytes', 0),
                 'total_bytes': data.get('total_bytes', 0),
                 'eta_seconds': data.get('eta_seconds', 0)
             }
-            self.update_status_summary()
+        self.update_status_summary()
 
     def task_finished(self, task_id, file_path):
         row = self.row_mapping.get(task_id)
@@ -831,7 +871,14 @@ class MainWindow(QMainWindow):
 
         self.table.item(row, 1).setText("Complete")
         self.table.item(row, 1).setForeground(QBrush(QColor("#2e7d32")))  # Solid Success Green
-        self.table.cellWidget(row, 2).setValue(100)
+        
+        # Reset progress bar to standard 100% format
+        progress_bar = self.table.cellWidget(row, 2)
+        if isinstance(progress_bar, QProgressBar):
+            progress_bar.setRange(0, 100)
+            progress_bar.setValue(100)
+            progress_bar.setFormat("100%")
+
         self.table.item(row, 3).setText("-")
         self.table.item(row, 4).setText("-")
         
