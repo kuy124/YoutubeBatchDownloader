@@ -5,6 +5,7 @@ import yt_dlp
 from PySide6.QtCore import QRunnable, QObject, Signal
 from .utils import get_ffmpeg_path
 from .logger import log
+from .converter import convert_m4a_to_mp3_fast
 
 class TitlePreviewSignals(QObject):
     fetched = Signal(list)
@@ -355,38 +356,40 @@ class DownloadWorker(QRunnable):
 
         ffmpeg_path = get_ffmpeg_path()
         
-        # Output template formatted for Windows Native Music/Media saving format with duplication prevention
+        # Output template formatted for Windows Native Music/Media saving format
         ydl_opts = {
-                'outtmpl': os.path.join(self.options['download_path'], '%(title)s.%(ext)s'),
-                'parse_metadata': [
-                    '%(uploader,channel,creator,artist)s:%(artist)s',
-                    '%(uploader,channel,creator,artist)s:%(album_artist)s',
-                    '%(uploader,channel,creator)s:%(composer)s',
-                    '%(title)s:%(album)s'
-                ],
-                'replace_in_metadata': [
-                    ('title', r'^(.+?)\s*-\s*\1\s*-\s*', r'\1 - ')
-                ],
-                'addmetadata': True,
-                'progress_hooks': [self.hook],
-                'postprocessor_hooks': [self.post_hook],
-                'quiet': True,
-                'no_warnings': True,
-                'nocheckcertificate': True,
-                'noplaylist': True,  # Globally force single video downloads
-                'retries': 10,
-                'fragment_retries': 10,
-                'socket_timeout': 30,
-                
-                # SPEED OPTIMIZATIONS: Skip extra manifests, full bandwidth streaming
-                'youtube_include_dash_manifest': False,
-                'youtube_include_hls_manifest': False,
-                
-                # Embed native metadata (Artist, Title, Album) for Windows File Explorer & Media Player
-                'addmetadata': True,
-                
-                # PERFORMANCE ENHANCEMENT: Downloads up to 16 stream fragments concurrently (parallel downloading)
-                'concurrent_fragment_downloads': 16,
+            'outtmpl': os.path.join(self.options['download_path'], '%(title)s.%(ext)s'),
+            'parse_metadata': [
+                '%(uploader,channel,creator,artist)s:%(artist)s',
+                '%(uploader,channel,creator,artist)s:%(album_artist)s',
+                '%(uploader,channel,creator)s:%(composer)s',
+                '%(title)s:%(album)s'
+            ],
+            'replace_in_metadata': [
+                ('title', r'^(.+?)\s*-\s*\1\s*-\s*', r'\1 - ')
+            ],
+            'progress_hooks': [self.hook],
+            'postprocessor_hooks': [self.post_hook],
+            'quiet': True,
+            'no_warnings': True,
+            'nocheckcertificate': True,
+            'noplaylist': True,  # Globally force single video downloads
+            'retries': 10,
+            'fragment_retries': 10,
+            'socket_timeout': 30,
+            
+            # ⚡ SAFE EXTRACTOR: Rotates Mobile Web & Android APIs to bypass bot detection & sign-in blocks
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['mweb', 'android', 'web'],
+                    'skip': ['translated_subs']
+                }
+            },
+            'check_formats': False,
+            'youtube_include_dash_manifest': False,
+            'youtube_include_hls_manifest': False,
+            'concurrent_fragment_downloads': 16,
+            'buffersize': 2097152,
             
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -397,20 +400,7 @@ class DownloadWorker(QRunnable):
 
         if ffmpeg_path:
             ydl_opts['ffmpeg_location'] = ffmpeg_path
-            
-            # UNIVERSAL METADATA MAPPING & ULTRA-FAST MP3 LAME ENCODING
-            ydl_opts['postprocessor_args'] = {
-                'ffmpeg': ['-threads', '0'],
-                'FFmpegMerger': ['-c:v', 'copy', '-c:a', 'copy', '-map_metadata', '0', '-movflags', '+faststart'],
-                'FFmpegExtractAudio': ['-threads', '0', '-compression_level', '0', '-q:a', '3', '-write_id3v2', '1', '-id3v2_version', '3'],
-                'ExtractAudio': ['-threads', '0', '-compression_level', '0', '-q:a', '3', '-write_id3v2', '1', '-id3v2_version', '3'],
-                'FFmpegMetadata': ['-map_metadata', '0', '-movflags', '+faststart'],
-                'FFmpegThumbnailsConvertor': ['-threads', '0', '-q:v', '2', '-vf', 'crop=ih:ih'],
-                'EmbedThumbnail': ['-id3v2_version', '3'],
-                'FFmpegVideoConvertor': ['-preset', 'ultrafast']
-            }
 
-        # Setup formats based on choices and local FFmpeg availability
         fmt = self.options.get('format', 'Best Quality (MKV)')
         quality = self.options.get('quality', 'Best')
         q_limit = f"[height<={quality.replace('p', '')}]" if quality != "Best" else ""
@@ -423,14 +413,11 @@ class DownloadWorker(QRunnable):
             ydl_opts['format'] = f'best{q_limit}/best'
         else:
             if fmt == "MP3 Audio":
-                ydl_opts['writethumbnail'] = True
-                ydl_opts['format'] = 'bestaudio[ext=m4a]/bestaudio'
-                ydl_opts['postprocessors'] = [
-                    {'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '0'},
-                    {'key': 'FFmpegMetadata', 'add_metadata': True},
-                    {'key': 'FFmpegThumbnailsConvertor', 'format': 'jpg'},
-                    {'key': 'EmbedThumbnail', 'already_have_thumbnail': False}
-                ]
+                ydl_opts['writethumbnail'] = False
+                ydl_opts['format'] = 'bestaudio/best'           # Accepts M4A, WebM, or Opus without format errors
+                ydl_opts['buffersize'] = 1048576
+                ydl_opts['http_chunk_size'] = 10485760
+                ydl_opts['postprocessors'] = []
             elif fmt == "M4A Audio":
                 ydl_opts['writethumbnail'] = True
                 ydl_opts['format'] = 'bestaudio[ext=m4a]/bestaudio/best'
@@ -507,6 +494,74 @@ class DownloadWorker(QRunnable):
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info_dict = ydl.extract_info(self.url, download=True)
                 
+                # ⚡ LIGHTNING MP3 CONVERSION PASS
+                if fmt == "MP3 Audio" and info_dict:
+                    downloaded_file = ydl.prepare_filename(info_dict)
+                    base_path = os.path.splitext(downloaded_file)[0]
+                    mp3_path = base_path + '.mp3'
+                    
+                    # Locate downloaded audio stream file (.m4a, .webm, etc.)
+                    source_file = downloaded_file
+                    if not os.path.exists(source_file):
+                        for ext in ['.m4a', '.webm', '.opus', '.mp4']:
+                            if os.path.exists(base_path + ext):
+                                source_file = base_path + ext
+                                break
+                    
+                    if os.path.exists(source_file) and source_file != mp3_path:
+                        self.signals.progress.emit(self.task_id, {
+                            'status_text': 'Lightning Converting...',
+                            'is_postprocessing': True
+                        })
+                        
+                        # Universal Thumbnail Fetcher (Converts WebP/PNG -> Genuine JPEG)
+                        thumb_url = info_dict.get('thumbnail')
+                        if not thumb_url and info_dict.get('thumbnails'):
+                            thumb_url = info_dict['thumbnails'][-1].get('url')
+
+                        if thumb_url:
+                            try:
+                                import urllib.request
+                                import ssl
+                                from PySide6.QtGui import QImage
+                                from PySide6.QtCore import QBuffer, QIODevice
+
+                                ssl_ctx = ssl.create_default_context()
+                                ssl_ctx.check_hostname = False
+                                ssl_ctx.verify_mode = ssl.CERT_NONE
+                                
+                                thumb_path = base_path + '.jpg'
+                                req = urllib.request.Request(thumb_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+                                with urllib.request.urlopen(req, timeout=2, context=ssl_ctx) as resp:
+                                    raw_bytes = resp.read()
+
+                                # Convert WebP -> Standard JPEG using PySide6 QImage engine
+                                qimg = QImage()
+                                if qimg.loadFromData(raw_bytes):
+                                    buf = QBuffer()
+                                    buf.open(QIODevice.WriteOnly)
+                                    if qimg.save(buf, "JPEG"):
+                                        raw_bytes = buf.data().data()
+
+                                with open(thumb_path, 'wb') as f:
+                                    f.write(raw_bytes)
+                            except Exception as ex:
+                                log.debug(f"Thumbnail download notice: {ex}")
+
+                        title = info_dict.get('title', '')
+                        artist = info_dict.get('artist') or info_dict.get('uploader') or info_dict.get('channel') or ''
+                        
+                        success = convert_m4a_to_mp3_fast(source_file, mp3_path, title=title, artist=artist)
+                        if success and os.path.exists(mp3_path):
+                            try:
+                                os.remove(source_file)
+                                log.info(f"Lightning conversion finished: {mp3_path}")
+                            except Exception as ex:
+                                log.warning(f"Could not remove source file {source_file}: {ex}")
+                        else:
+                            self.signals.error.emit(self.task_id, "Failed: Audio conversion failed.")
+                            return
+
                 # Remux M4A container to raw .aac with full ID3v2 metadata preservation
                 if fmt == "AAC Audio" and ffmpeg_path and info_dict:
                     downloaded_file = ydl.prepare_filename(info_dict)
@@ -577,11 +632,9 @@ class DownloadWorker(QRunnable):
                     })
                     time.sleep(2)  # Safe backoff wait
                 else:
-                    # Final crash out of automated retry block. Forward final errors to GUI controller.
                     err_msg = str(e)
                     log.error(f"Task {self.task_id} exhausted all auto-retries. Final Error: {err_msg}")
                     
-                    # Friendly error translation mapping
                     if "403" in err_msg or "Forbidden" in err_msg:
                         friendly_err = "Failed: YouTube blocked request. Try updating yt-dlp."
                     elif "Sign in to confirm" in err_msg or "age" in err_msg:

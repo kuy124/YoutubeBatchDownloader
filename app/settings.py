@@ -14,8 +14,8 @@ class Settings:
             "format": "MP3 Audio",
             "quality": "480p",
             "auto_clear": False,
-            "monitor_clipboard": False,  # Clipboard auto-monitor setting
-            "threads": 6
+            "monitor_clipboard": False,
+            "threads": max(12, (os.cpu_count() or 4) * 2)
         }
         self.load()
 
@@ -37,8 +37,8 @@ class Settings:
         except Exception as e:
             log.error(f"Failed to save settings: {str(e)}")
 
-    def get(self, key):
-        return self.config.get(key)
+    def get(self, key, default=None):
+        return self.config.get(key, default)
 
     def set(self, key, value):
         self.config[key] = value

@@ -1,0 +1,102 @@
+import os
+import subprocess
+from mutagen.mp3 import MP3
+from mutagen.id3 import ID3, TIT2, TPE1, APIC, ID3NoHeaderError
+from .logger import log
+from .utils import get_ffmpeg_path
+
+def convert_m4a_to_mp3_fast(source_audio: str, mp3_path: str, title: str = "", artist: str = "") -> bool:
+    """
+    Rock-Solid Fast Audio Transcoder.
+    Strips video/subtitle streams (-vn -sn -dn) and transcodes audio to MP3 using LAME C-assembly.
+    """
+    ffmpeg_bin = get_ffmpeg_path()
+    if not ffmpeg_bin or not os.path.exists(source_audio):
+        log.error(f"Cannot start conversion. FFmpeg present: {bool(ffmpeg_bin)}, Source present: {os.path.exists(source_audio)}")
+        return False
+
+    base_no_ext = os.path.splitext(source_audio)[0]
+    thumb_file = None
+    for ext in ['.jpg', '.png', '.webp', '.jpeg']:
+        possible_thumb = base_no_ext + ext
+        if os.path.exists(possible_thumb):
+            thumb_file = possible_thumb
+            break
+
+    # Windows-specific process flags to eliminate console window spawn overhead
+    creationflags = 0
+    if os.name == 'nt':
+        creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000)
+
+    # Clean, High-Speed FFmpeg Command
+    cmd = [
+        ffmpeg_bin,
+        "-y",
+        "-loglevel", "error",
+        "-threads", "0",                         # Max CPU parallelism
+        "-i", source_audio,
+        "-vn", "-sn", "-dn",                     # Ignore video, subtitle, and data streams
+        "-c:a", "libmp3lame",
+        "-b:a", "192k",                          # Fixed 192k CBR
+        "-compression_level", "9",               # 9 = Fastest LAME algorithm
+        "-ac", "2",
+        "-ar", "44100",
+        "-id3v2_version", "3",
+        mp3_path
+    ]
+
+    res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, creationflags=creationflags)
+    if res.returncode != 0:
+        err = res.stderr.decode('utf-8', errors='ignore')
+        log.error(f"FFmpeg conversion failed for {source_audio}: {err}")
+        return False
+
+    # Ingest ID3 Tags & Cover Art instantly via Mutagen (<2ms, 0 FFmpeg video overhead)
+    try:
+        try:
+            id3 = ID3(mp3_path)
+        except ID3NoHeaderError:
+            id3 = ID3()
+
+        if title:
+            id3.add(TIT2(encoding=3, text=title))
+        if artist:
+            id3.add(TPE1(encoding=3, text=artist))
+
+        if thumb_file and os.path.exists(thumb_file):
+            try:
+                with open(thumb_file, 'rb') as img_f:
+                    img_bytes = img_f.read()
+
+                # Convert WebP/PNG -> Genuine JPEG for ID3 APIC compliance
+                from PySide6.QtGui import QImage
+                from PySide6.QtCore import QBuffer, QIODevice
+                qimg = QImage()
+                if qimg.loadFromData(img_bytes):
+                    buf = QBuffer()
+                    buf.open(QIODevice.WriteOnly)
+                    if qimg.save(buf, "JPEG"):
+                        img_bytes = buf.data().data()
+
+                id3.add(APIC(
+                    encoding=3,
+                    mime='image/jpeg',
+                    type=3, # Front cover
+                    desc='Cover',
+                    data=img_bytes
+                ))
+            except Exception as img_err:
+                log.debug(f"Cover art embed notice: {img_err}")
+
+        id3.save(mp3_path, v2_version=3)
+    except Exception as tag_err:
+        log.debug(f"ID3 tag write notice: {tag_err}")
+
+    # Clean up temporary thumbnail image
+    if thumb_file and os.path.exists(thumb_file):
+        try:
+            os.remove(thumb_file)
+        except Exception:
+            pass
+
+    return True

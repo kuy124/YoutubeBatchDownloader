@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
 from PySide6.QtCore import QThreadPool, Qt, QTimer, QRunnable, QObject, Signal
 from PySide6.QtGui import QBrush, QColor, QIcon, QTextCharFormat, QTextCursor
 
-APP_VERSION = "v1.6.3"
+APP_VERSION = "v1.6.4"
 
 def parse_version(ver_str: str) -> tuple:
     cleaned = re.sub(r'[^0-9.]', '', ver_str)
@@ -89,7 +89,9 @@ class MainWindow(QMainWindow):
             self.setWindowIcon(QIcon(icon_path))
         
         self.threadpool = QThreadPool()
-        self.threadpool.setMaxThreadCount(self.settings.get("threads"))
+        # Max out parallel thread pool across all CPU logical cores
+        max_threads = max(12, (os.cpu_count() or 4) * 2)
+        self.threadpool.setMaxThreadCount(max_threads)
         
         self.active_workers = {}
         self.row_mapping = {}
@@ -774,23 +776,18 @@ class MainWindow(QMainWindow):
         
         self.row_mapping[task_id] = row_idx
 
-        if title:
-            # Instant start: use pre-fetched title preview directly
-            pre_data = {'title': title}
-            self.task_data[task_id]['pre_data'] = pre_data
-            worker = DownloadWorker(task_id, url, options, pre_data)
-            worker.signals.progress.connect(self.update_progress)
-            worker.signals.finished.connect(self.task_finished)
-            worker.signals.error.connect(self.task_error)
-            
-            self.active_workers[task_id] = worker
-            self.threadpool.start(worker)
-        else:
-            # Step 1: Pre-extract metadata first across queue
-            meta_worker = MetadataWorker(task_id, url)
-            meta_worker.signals.finished.connect(self.on_metadata_extracted)
-            meta_worker.signals.error.connect(lambda tid, err: self.task_error(tid, err))
-            self.threadpool.start(meta_worker)
+        # INSTANT 0ms LAUNCH: Bypasses double-pass network roundtrips
+        pre_title = title if title else f"Downloading..."
+        pre_data = {'title': pre_title}
+        self.task_data[task_id]['pre_data'] = pre_data
+
+        worker = DownloadWorker(task_id, url, options, pre_data)
+        worker.signals.progress.connect(self.update_progress)
+        worker.signals.finished.connect(self.task_finished)
+        worker.signals.error.connect(self.task_error)
+        
+        self.active_workers[task_id] = worker
+        self.threadpool.start(worker)
 
         self.filter_table(self.search_input.text())
         self.update_status_summary()

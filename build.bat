@@ -33,8 +33,8 @@ pip install pyinstaller --no-cache-dir
 :: 5. Execute compilation with PyInstaller
 echo Compiling standalone executable with PyInstaller...
 
-:: Note: 'email' MUST NOT be excluded because urllib.request requires it for HTTP response headers
-set PYI_FLAGS=--noconfirm --windowed --onefile --add-data "tools;tools" --collect-data yt_dlp --hidden-import=yt_dlp --hidden-import=mutagen --exclude-module tkinter --exclude-module unittest --exclude-module pydoc --exclude-module urllib3.contrib.emscripten
+:: Note: '--collect-all av' ensures all PyAV C-extensions, resamplers, and DLLs are bundled cleanly
+set PYI_FLAGS=--noconfirm --windowed --onefile --add-data "tools;tools" --collect-data yt_dlp --collect-all av --hidden-import=yt_dlp --hidden-import=mutagen --exclude-module tkinter --exclude-module unittest --exclude-module pydoc --exclude-module urllib3.contrib.emscripten
 
 if exist icon.ico (
     pyinstaller %PYI_FLAGS% --add-data "icon.ico;." --icon icon.ico --name "YouTubeBatchDownloader" app/main.py
