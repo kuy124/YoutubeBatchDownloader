@@ -31,10 +31,32 @@ pip install pyinstaller --no-cache-dir
 :pyinstaller_ok
 
 :: 5. Execute compilation with PyInstaller
-echo Compiling standalone executable with PyInstaller...
+echo Compiling lightweight standalone executable...
 
-:: Note: '--collect-all av' ensures all PyAV C-extensions, resamplers, and DLLs are bundled cleanly
-set PYI_FLAGS=--noconfirm --windowed --onefile --add-data "tools;tools" --collect-data yt_dlp --collect-all av --hidden-import=yt_dlp --hidden-import=mutagen --exclude-module tkinter --exclude-module unittest --exclude-module pydoc --exclude-module urllib3.contrib.emscripten
+set PYI_FLAGS=--noconfirm --windowed --onefile ^
+    --add-data "tools;tools" ^
+    --collect-data yt_dlp ^
+    --hidden-import=yt_dlp ^
+    --hidden-import=mutagen ^
+    --exclude-module av ^
+    --exclude-module tkinter ^
+    --exclude-module unittest ^
+    --exclude-module pydoc ^
+    --exclude-module urllib3.contrib.emscripten ^
+    --exclude-module PySide6.QtQml ^
+    --exclude-module PySide6.QtQuick ^
+    --exclude-module PySide6.QtPdf ^
+    --exclude-module PySide6.QtOpenGL ^
+    --exclude-module PySide6.Qt3D ^
+    --exclude-module PySide6.QtSvg ^
+    --exclude-module PySide6.QtSql ^
+    --exclude-module PySide6.QtTest ^
+    --exclude-module PySide6.QtWebEngine ^
+    --exclude-module PySide6.QtXml ^
+    --exclude-module PySide6.QtMultimedia ^
+    --exclude-module PySide6.QtPositioning ^
+    --exclude-module PySide6.QtSensors ^
+    --exclude-module PySide6.QtPrintSupport
 
 if exist icon.ico (
     pyinstaller %PYI_FLAGS% --add-data "icon.ico;." --icon icon.ico --name "YouTubeBatchDownloader" app/main.py
@@ -44,6 +66,6 @@ if exist icon.ico (
 
 echo.
 echo ========================================================
-echo Build finished! Your standalone EXE is located in the 'dist' folder.
+echo Build finished! Your lightweight EXE is in the 'dist' folder.
 echo ========================================================
 pause

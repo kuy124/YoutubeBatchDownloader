@@ -494,7 +494,7 @@ class DownloadWorker(QRunnable):
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info_dict = ydl.extract_info(self.url, download=True)
                 
-                # ⚡ LIGHTNING MP3 CONVERSION PASS
+                # MP3 CONVERSION PASS
                 if fmt == "MP3 Audio" and info_dict:
                     downloaded_file = ydl.prepare_filename(info_dict)
                     base_path = os.path.splitext(downloaded_file)[0]
@@ -510,7 +510,7 @@ class DownloadWorker(QRunnable):
                     
                     if os.path.exists(source_file) and source_file != mp3_path:
                         self.signals.progress.emit(self.task_id, {
-                            'status_text': 'Lightning Converting...',
+                            'status_text': 'Converting...',
                             'is_postprocessing': True
                         })
                         
@@ -555,7 +555,7 @@ class DownloadWorker(QRunnable):
                         if success and os.path.exists(mp3_path):
                             try:
                                 os.remove(source_file)
-                                log.info(f"Lightning conversion finished: {mp3_path}")
+                                log.info(f"Conversion finished: {mp3_path}")
                             except Exception as ex:
                                 log.warning(f"Could not remove source file {source_file}: {ex}")
                         else:
