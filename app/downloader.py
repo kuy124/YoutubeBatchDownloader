@@ -195,11 +195,21 @@ class DownloadWorker(QRunnable):
         self.pre_data = pre_data or {}
         self.signals = DownloadSignals()
         self.is_cancelled = False
+        self.current_process = None
         self.final_filename = ""
         self.extraction_time = self.pre_data.get('extraction_time', 0.0)
         self.download_start_time = None
         self.queued_time = self.options.get('queued_time') or time.time()
         self.speed_history = []  # Rolling 15-sample window for smooth Mbps & steady ETA
+
+    def cancel(self):
+        """Triggers cancellation and immediately kills any active conversion/transcoding process."""
+        self.is_cancelled = True
+        if self.current_process and self.current_process.poll() is None:
+            try:
+                self.current_process.kill()
+            except Exception:
+                pass
 
     def post_hook(self, d):
         if self.is_cancelled:
@@ -304,7 +314,7 @@ class DownloadWorker(QRunnable):
             self.signals.progress.emit(self.task_id, data)
 
     def cleanup_partial_files(self, filepath: str):
-        """Safely removes all incomplete, .part, fragment, and thumbnail files when a download is cancelled."""
+        """Safely removes all incomplete, converted, thumbnail, and media files when a task is cancelled."""
         download_dir = self.options.get('download_path') or (os.path.dirname(filepath) if filepath else "")
         title = self.pre_data.get('title') or ""
         
@@ -329,17 +339,11 @@ class DownloadWorker(QRunnable):
                     
                 for base in target_bases:
                     if f.startswith(base):
-                        # Delete ONLY part, temp, fragment, ytdl, and thumbnail files on cancellation
-                        if (
-                            f.endswith('.part') or f.endswith('.temp') or f.endswith('.ytdl') or
-                            f.endswith('.jpg') or f.endswith('.png') or f.endswith('.webp') or
-                            '.f' in f
-                        ):
-                            try:
-                                os.remove(full_path)
-                                log.info(f"Cleanup: Removed cancelled download residue: {full_path}")
-                            except Exception as ex:
-                                log.error(f"Failed removing residue {full_path}: {ex}")
+                        try:
+                            os.remove(full_path)
+                            log.info(f"Cleanup: Removed cancelled task file/residue: {full_path}")
+                        except Exception as ex:
+                            log.error(f"Failed removing residue {full_path}: {ex}")
                         break
         except Exception as ex:
             log.error(f"Error during file cleanup: {ex}")
@@ -496,6 +500,11 @@ class DownloadWorker(QRunnable):
                 
                 # MP3 CONVERSION PASS
                 if fmt == "MP3 Audio" and info_dict:
+                    if self.is_cancelled:
+                        self.cleanup_partial_files(self.final_filename)
+                        self.signals.error.emit(self.task_id, "Cancelled.")
+                        return
+
                     downloaded_file = ydl.prepare_filename(info_dict)
                     base_path = os.path.splitext(downloaded_file)[0]
                     mp3_path = base_path + '.mp3'
@@ -519,7 +528,7 @@ class DownloadWorker(QRunnable):
                         if not thumb_url and info_dict.get('thumbnails'):
                             thumb_url = info_dict['thumbnails'][-1].get('url')
 
-                        if thumb_url:
+                        if thumb_url and not self.is_cancelled:
                             try:
                                 import urllib.request
                                 import ssl
@@ -548,10 +557,25 @@ class DownloadWorker(QRunnable):
                             except Exception as ex:
                                 log.debug(f"Thumbnail download notice: {ex}")
 
+                        if self.is_cancelled:
+                            self.cleanup_partial_files(source_file)
+                            self.signals.error.emit(self.task_id, "Cancelled.")
+                            return
+
                         title = info_dict.get('title', '')
                         artist = info_dict.get('artist') or info_dict.get('uploader') or info_dict.get('channel') or ''
                         
-                        success = convert_m4a_to_mp3_fast(source_file, mp3_path, title=title, artist=artist)
+                        success = convert_m4a_to_mp3_fast(
+                            source_file, mp3_path, title=title, artist=artist,
+                            is_cancelled_cb=lambda: self.is_cancelled
+                        )
+
+                        if self.is_cancelled:
+                            self.cleanup_partial_files(mp3_path)
+                            self.cleanup_partial_files(source_file)
+                            self.signals.error.emit(self.task_id, "Cancelled.")
+                            return
+
                         if success and os.path.exists(mp3_path):
                             try:
                                 os.remove(source_file)
@@ -559,24 +583,54 @@ class DownloadWorker(QRunnable):
                             except Exception as ex:
                                 log.warning(f"Could not remove source file {source_file}: {ex}")
                         else:
-                            self.signals.error.emit(self.task_id, "Failed: Audio conversion failed.")
+                            if not self.is_cancelled:
+                                self.signals.error.emit(self.task_id, "Failed: Audio conversion failed.")
+                            else:
+                                self.cleanup_partial_files(mp3_path)
+                                self.cleanup_partial_files(source_file)
+                                self.signals.error.emit(self.task_id, "Cancelled.")
                             return
 
                 # Remux M4A container to raw .aac with full ID3v2 metadata preservation
                 if fmt == "AAC Audio" and ffmpeg_path and info_dict:
+                    if self.is_cancelled:
+                        self.cleanup_partial_files(self.final_filename)
+                        self.signals.error.emit(self.task_id, "Cancelled.")
+                        return
+
                     downloaded_file = ydl.prepare_filename(info_dict)
                     base_path = os.path.splitext(downloaded_file)[0]
                     aac_path = base_path + '.aac'
                     if os.path.exists(downloaded_file) and downloaded_file != aac_path:
                         import subprocess
-                        subprocess.run([
+                        creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000) if os.name == 'nt' else 0
+                        proc = subprocess.Popen([
                             ffmpeg_path, '-y', '-threads', '0',
                             '-i', downloaded_file,
                             '-vn', '-c:a', 'copy',
                             '-map_metadata', '0',
                             '-write_id3v2', '1',
                             aac_path
-                        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creationflags)
+                        
+                        self.current_process = proc
+                        while proc.poll() is None:
+                            if self.is_cancelled:
+                                proc.kill()
+                                proc.wait()
+                                self.cleanup_partial_files(aac_path)
+                                self.cleanup_partial_files(downloaded_file)
+                                self.signals.error.emit(self.task_id, "Cancelled.")
+                                return
+                            time.sleep(0.05)
+                        self.current_process = None
+
+                        if self.is_cancelled:
+                            self.cleanup_partial_files(aac_path)
+                            self.cleanup_partial_files(downloaded_file)
+                            self.signals.error.emit(self.task_id, "Cancelled.")
+                            return
+
                         if os.path.exists(aac_path):
                             try:
                                 os.remove(downloaded_file)

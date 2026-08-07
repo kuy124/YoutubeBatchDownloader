@@ -5,10 +5,13 @@ from mutagen.id3 import ID3, TIT2, TPE1, APIC, ID3NoHeaderError
 from .logger import log
 from .utils import get_ffmpeg_path
 
-def convert_m4a_to_mp3_fast(source_audio: str, mp3_path: str, title: str = "", artist: str = "") -> bool:
+import time
+
+def convert_m4a_to_mp3_fast(source_audio: str, mp3_path: str, title: str = "", artist: str = "", is_cancelled_cb=None) -> bool:
     """
     Rock-Solid Fast Audio Transcoder.
     Strips video/subtitle streams (-vn -sn -dn) and transcodes audio to MP3 using LAME C-assembly.
+    Supports real-time cancellation.
     """
     ffmpeg_bin = get_ffmpeg_path()
     if not ffmpeg_bin or not os.path.exists(source_audio):
@@ -45,9 +48,21 @@ def convert_m4a_to_mp3_fast(source_audio: str, mp3_path: str, title: str = "", a
         mp3_path
     ]
 
-    res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, creationflags=creationflags)
-    if res.returncode != 0:
-        err = res.stderr.decode('utf-8', errors='ignore')
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, creationflags=creationflags)
+    while proc.poll() is None:
+        if is_cancelled_cb and is_cancelled_cb():
+            proc.kill()
+            proc.wait()
+            if os.path.exists(mp3_path):
+                try:
+                    os.remove(mp3_path)
+                except Exception:
+                    pass
+            return False
+        time.sleep(0.05)
+
+    if proc.returncode != 0:
+        err = proc.stderr.read().decode('utf-8', errors='ignore')
         log.error(f"FFmpeg conversion failed for {source_audio}: {err}")
         return False
 

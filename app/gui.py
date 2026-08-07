@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
 from PySide6.QtCore import QThreadPool, Qt, QTimer, QRunnable, QObject, Signal
 from PySide6.QtGui import QBrush, QColor, QIcon, QTextCharFormat, QTextCursor
 
-APP_VERSION = "v1.6.4"
+APP_VERSION = "v1.6.5"
 
 def parse_version(ver_str: str) -> tuple:
     cleaned = re.sub(r'[^0-9.]', '', ver_str)
@@ -822,7 +822,7 @@ class MainWindow(QMainWindow):
     def cancel_task(self, task_id):
         worker = self.active_workers.get(task_id)
         if worker:
-            worker.is_cancelled = True
+            worker.cancel()
             
         # INSTANT TRASH OPTIMIZATION: Discard the UI row from the table immediately 
         # when clicking "Cancel". Background thread handles file deletion safely.
