@@ -359,8 +359,11 @@ class DownloadWorker(QRunnable):
         })
 
         ffmpeg_path = get_ffmpeg_path()
-        
-        # Output template formatted for Windows Native Music/Media saving format
+        if ffmpeg_path:
+            ffmpeg_dir = os.path.dirname(ffmpeg_path)
+            if ffmpeg_dir and ffmpeg_dir not in os.environ.get("PATH", ""):
+                os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
+
         ydl_opts = {
             'outtmpl': os.path.join(self.options['download_path'], '%(title)s.%(ext)s'),
             'parse_metadata': [
@@ -377,29 +380,18 @@ class DownloadWorker(QRunnable):
             'quiet': True,
             'no_warnings': True,
             'nocheckcertificate': True,
-            'noplaylist': True,  # Globally force single video downloads
-            'retries': 10,
-            'fragment_retries': 10,
-            'socket_timeout': 30,
-            
-            # ⚡ SAFE EXTRACTOR: Rotates Mobile Web & Android APIs to bypass bot detection & sign-in blocks
-            'extractor_args': {
-                'youtube': {
-                    'player_client': ['mweb', 'android', 'web'],
-                    'skip': ['translated_subs']
-                }
+            'noplaylist': True,
+            'cachedir': False,
+            'concurrent_fragment_downloads': 8,  # Downloads 8 fragments simultaneously in parallel
+            'throttled_rate': 102400,           # Drops & restarts connection if YouTube throttles speed below 100KB/s
+            'retries': 15,
+            'fragment_retries': 15,
+            'file_access_retries': 5,
+            'socket_timeout': 15,               # Fast timeout recovery so it never hangs for 30s
+            'retry_sleep_functions': {
+                'http': lambda n: 0.5,          # Fast recovery without sleeping
+                'fragment': lambda n: 0.5
             },
-            'check_formats': False,
-            'youtube_include_dash_manifest': False,
-            'youtube_include_hls_manifest': False,
-            'concurrent_fragment_downloads': 16,
-            'buffersize': 2097152,
-            
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-us,en;q=0.5',
-            }
         }
 
         if ffmpeg_path:
@@ -407,36 +399,53 @@ class DownloadWorker(QRunnable):
 
         fmt = self.options.get('format', 'Best Quality (MKV)')
         quality = self.options.get('quality', 'Best')
-        q_limit = f"[height<={quality.replace('p', '')}]" if quality != "Best" else ""
+        boost_str = self.options.get('audio_boost', '100% (Original)')
+        boost_match = re.search(r'(\d+)%', boost_str)
+        vol_pct = int(boost_match.group(1)) if boost_match else 100
+        vol_mult = vol_pct / 100.0
+        has_boost = vol_pct > 100
+
+        # Numeric parser for video resolution (height) & audio bitrate
+        num_match = re.search(r'(\d+)', quality)
+        parsed_num = num_match.group(1) if num_match else None
+        
+        max_h = parsed_num if (parsed_num and "Audio" not in fmt and "Best" not in quality) else None
+        audio_bitrate_num = parsed_num if (parsed_num and "Audio" in fmt) else "192"
+        audio_bitrate_str = f"{audio_bitrate_num}k"
+        
+        # Build strict highest-resolution format string
+        if max_h:
+            video_format = f"bv*[height<={max_h}]+ba/b[height<={max_h}]/bv*+ba/b"
+        else:
+            video_format = "bv*+ba/b"
 
         if not ffmpeg_path:
-            if "Audio" in fmt:
-                self.signals.error.emit(self.task_id, f"Failed: FFmpeg required for {fmt}.")
-                return
-            log.warning("FFmpeg not found. Restricting stream requests to pre-merged files.")
-            ydl_opts['format'] = f'best{q_limit}/best'
+            self.signals.error.emit(self.task_id, "Failed: FFmpeg binary missing in tools/. Please run install.bat.")
+            return
         else:
             if fmt == "MP3 Audio":
                 ydl_opts['writethumbnail'] = False
-                ydl_opts['format'] = 'bestaudio/best'           # Accepts M4A, WebM, or Opus without format errors
-                ydl_opts['buffersize'] = 1048576
-                ydl_opts['http_chunk_size'] = 10485760
+                ydl_opts['format'] = 'bestaudio/best'
                 ydl_opts['postprocessors'] = []
             elif fmt == "M4A Audio":
                 ydl_opts['writethumbnail'] = True
                 ydl_opts['format'] = 'bestaudio[ext=m4a]/bestaudio/best'
                 ydl_opts['postprocessors'] = [
-                    {'key': 'FFmpegExtractAudio', 'preferredcodec': 'm4a'},
+                    {'key': 'FFmpegExtractAudio', 'preferredcodec': 'm4a', 'preferredquality': audio_bitrate_num},
                     {'key': 'FFmpegMetadata', 'add_metadata': True},
                     {'key': 'FFmpegThumbnailsConvertor', 'format': 'jpg'},
                     {'key': 'EmbedThumbnail', 'already_have_thumbnail': False}
                 ]
+                if has_boost:
+                    ydl_opts['postprocessor_args'] = {'extractaudio': ['-filter:a', f'volume={vol_mult}']}
             elif fmt == "WAV Audio":
                 ydl_opts['format'] = 'bestaudio/best'
                 ydl_opts['postprocessors'] = [
                     {'key': 'FFmpegExtractAudio', 'preferredcodec': 'wav'},
                     {'key': 'FFmpegMetadata', 'add_metadata': True}
                 ]
+                if has_boost:
+                    ydl_opts['postprocessor_args'] = {'extractaudio': ['-filter:a', f'volume={vol_mult}']}
             elif fmt == "FLAC Audio":
                 ydl_opts['writethumbnail'] = True
                 ydl_opts['format'] = 'bestaudio/best'
@@ -446,44 +455,70 @@ class DownloadWorker(QRunnable):
                     {'key': 'FFmpegThumbnailsConvertor', 'format': 'jpg'},
                     {'key': 'EmbedThumbnail', 'already_have_thumbnail': False}
                 ]
+                if has_boost:
+                    ydl_opts['postprocessor_args'] = {'extractaudio': ['-filter:a', f'volume={vol_mult}']}
             elif fmt == "AAC Audio":
                 ydl_opts['format'] = 'bestaudio[ext=m4a]/bestaudio/best'
                 ydl_opts['postprocessors'] = [
-                    {'key': 'FFmpegExtractAudio', 'preferredcodec': 'aac'},
+                    {'key': 'FFmpegExtractAudio', 'preferredcodec': 'aac', 'preferredquality': audio_bitrate_num},
                     {'key': 'FFmpegMetadata', 'add_metadata': True}
                 ]
+                if has_boost:
+                    ydl_opts['postprocessor_args'] = {'extractaudio': ['-filter:a', f'volume={vol_mult}']}
             elif fmt == "OPUS Audio":
                 ydl_opts['writethumbnail'] = True
                 ydl_opts['format'] = 'bestaudio[ext=webm]/bestaudio/best'
                 ydl_opts['postprocessors'] = [
-                    {'key': 'FFmpegExtractAudio', 'preferredcodec': 'opus'},
+                    {'key': 'FFmpegExtractAudio', 'preferredcodec': 'opus', 'preferredquality': audio_bitrate_num},
                     {'key': 'FFmpegMetadata', 'add_metadata': True},
                     {'key': 'FFmpegThumbnailsConvertor', 'format': 'jpg'},
                     {'key': 'EmbedThumbnail', 'already_have_thumbnail': False}
                 ]
+                if has_boost:
+                    ydl_opts['postprocessor_args'] = {'extractaudio': ['-filter:a', f'volume={vol_mult}']}
             elif fmt == "MP4 Video":
-                ydl_opts['format'] = f'bestvideo{q_limit}[ext=mp4]+bestaudio[ext=m4a]/bestvideo{q_limit}+bestaudio/best'
-                ydl_opts['format_sort'] = ['vcodec:h264', 'acodec:m4a']
+                ydl_opts['format'] = video_format
+                ydl_opts['format_sort'] = ['res', 'fps', 'quality', 'size', 'br']
+                ydl_opts['format_sort_force'] = True
                 ydl_opts['merge_output_format'] = 'mp4'
                 ydl_opts['postprocessors'] = [{'key': 'FFmpegMetadata', 'add_metadata': True}]
+                if has_boost:
+                    ydl_opts['postprocessor_args'] = {'merger': ['-c:v', 'copy', '-c:a', 'aac', '-filter:a', f'volume={vol_mult}']}
             elif fmt == "WEBM Video":
-                ydl_opts['format'] = f'bestvideo{q_limit}[ext=webm]+bestaudio[ext=webm]/bestvideo{q_limit}+bestaudio/best'
+                ydl_opts['format'] = video_format
+                ydl_opts['format_sort'] = ['res', 'fps', 'quality']
+                ydl_opts['format_sort_force'] = True
                 ydl_opts['merge_output_format'] = 'webm'
                 ydl_opts['postprocessors'] = [{'key': 'FFmpegMetadata', 'add_metadata': True}]
+                if has_boost:
+                    ydl_opts['postprocessor_args'] = {'merger': ['-c:v', 'copy', '-c:a', 'libopus', '-filter:a', f'volume={vol_mult}']}
             elif fmt == "AVI Video":
-                ydl_opts['format'] = f'bestvideo{q_limit}[ext=mp4]+bestaudio[ext=m4a]/bestvideo{q_limit}+bestaudio/best'
-                ydl_opts['format_sort'] = ['vcodec:h264', 'acodec:m4a']
+                ydl_opts['format'] = video_format
+                ydl_opts['format_sort'] = ['res', 'fps', 'quality']
+                ydl_opts['format_sort_force'] = True
                 ydl_opts['merge_output_format'] = 'avi'
                 ydl_opts['postprocessors'] = [{'key': 'FFmpegVideoConvertor', 'preferedformat': 'avi'}, {'key': 'FFmpegMetadata', 'add_metadata': True}]
+                if has_boost:
+                    ydl_opts['postprocessor_args'] = {
+                        'merger': ['-c:v', 'copy', '-c:a', 'libmp3lame', '-filter:a', f'volume={vol_mult}'],
+                        'videoconvertor': ['-filter:a', f'volume={vol_mult}']
+                    }
             elif fmt == "MOV Video":
-                ydl_opts['format'] = f'bestvideo{q_limit}[ext=mp4]+bestaudio[ext=m4a]/bestvideo{q_limit}+bestaudio/best'
-                ydl_opts['format_sort'] = ['vcodec:h264', 'acodec:m4a']
+                ydl_opts['format'] = video_format
+                ydl_opts['format_sort'] = ['res', 'fps', 'quality']
+                ydl_opts['format_sort_force'] = True
                 ydl_opts['merge_output_format'] = 'mov'
                 ydl_opts['postprocessors'] = [{'key': 'FFmpegMetadata', 'add_metadata': True}]
+                if has_boost:
+                    ydl_opts['postprocessor_args'] = {'merger': ['-c:v', 'copy', '-c:a', 'aac', '-filter:a', f'volume={vol_mult}']}
             else:  # Best Quality (MKV)
-                ydl_opts['format'] = f'bestvideo{q_limit}+bestaudio/best'
+                ydl_opts['format'] = video_format
+                ydl_opts['format_sort'] = ['res', 'fps', 'quality', 'size', 'br']
+                ydl_opts['format_sort_force'] = True
                 ydl_opts['merge_output_format'] = 'mkv'
                 ydl_opts['postprocessors'] = [{'key': 'FFmpegMetadata', 'add_metadata': True}]
+                if has_boost:
+                    ydl_opts['postprocessor_args'] = {'merger': ['-c:v', 'copy', '-c:a', 'aac', '-filter:a', f'volume={vol_mult}']}
 
         # --- Automatic Background Retry Loop ---
         max_auto_retries = 3
@@ -567,7 +602,9 @@ class DownloadWorker(QRunnable):
                         
                         success = convert_m4a_to_mp3_fast(
                             source_file, mp3_path, title=title, artist=artist,
-                            is_cancelled_cb=lambda: self.is_cancelled
+                            is_cancelled_cb=lambda: self.is_cancelled,
+                            volume_boost=boost_str,
+                            quality=quality
                         )
 
                         if self.is_cancelled:
@@ -604,14 +641,21 @@ class DownloadWorker(QRunnable):
                     if os.path.exists(downloaded_file) and downloaded_file != aac_path:
                         import subprocess
                         creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000) if os.name == 'nt' else 0
-                        proc = subprocess.Popen([
+                        aac_cmd = [
                             ffmpeg_path, '-y', '-threads', '0',
                             '-i', downloaded_file,
-                            '-vn', '-c:a', 'copy',
+                            '-vn'
+                        ]
+                        if has_boost:
+                            aac_cmd.extend(['-c:a', 'aac', '-b:a', audio_bitrate_str, '-filter:a', f'volume={vol_mult}'])
+                        else:
+                            aac_cmd.extend(['-c:a', 'aac', '-b:a', audio_bitrate_str])
+                        aac_cmd.extend([
                             '-map_metadata', '0',
                             '-write_id3v2', '1',
                             aac_path
-                        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creationflags)
+                        ])
+                        proc = subprocess.Popen(aac_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creationflags)
                         
                         self.current_process = proc
                         while proc.poll() is None:

@@ -16,10 +16,11 @@ def get_ffmpeg_path() -> str:
         if os.path.exists(bundled_path):
             return bundled_path
 
-    # 2. Check developer workspace tools folder
-    local_path = os.path.join(get_root_dir(), "tools", "ffmpeg.exe")
-    if os.path.exists(local_path):
-        return local_path
+    # 2. Check local tools directory and root directory
+    for rel_path in [os.path.join("tools", "ffmpeg.exe"), "ffmpeg.exe"]:
+        local_path = os.path.join(get_root_dir(), rel_path)
+        if os.path.exists(local_path):
+            return local_path
     
     # 3. Check system PATH globally
     system_path = shutil.which('ffmpeg')

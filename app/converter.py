@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 from mutagen.mp3 import MP3
 from mutagen.id3 import ID3, TIT2, TPE1, APIC, ID3NoHeaderError
@@ -7,11 +8,11 @@ from .utils import get_ffmpeg_path
 
 import time
 
-def convert_m4a_to_mp3_fast(source_audio: str, mp3_path: str, title: str = "", artist: str = "", is_cancelled_cb=None) -> bool:
+def convert_m4a_to_mp3_fast(source_audio: str, mp3_path: str, title: str = "", artist: str = "", is_cancelled_cb=None, volume_boost: str = "100% (Original)", quality: str = "192 kbps") -> bool:
     """
     Rock-Solid Fast Audio Transcoder.
-    Strips video/subtitle streams (-vn -sn -dn) and transcodes audio to MP3 using LAME C-assembly.
-    Supports real-time cancellation.
+    Strips video/subtitle streams (-vn -sn -dn) and transcodes audio to MP3 using customizable LAME bitrates.
+    Supports real-time cancellation and volume amplification.
     """
     ffmpeg_bin = get_ffmpeg_path()
     if not ffmpeg_bin or not os.path.exists(source_audio):
@@ -26,6 +27,10 @@ def convert_m4a_to_mp3_fast(source_audio: str, mp3_path: str, title: str = "", a
             thumb_file = possible_thumb
             break
 
+    # Extract user-selected bitrate (e.g. 320k, 256k, 192k, 128k, 96k)
+    bitrate_match = re.search(r'(\d+)', quality)
+    bitrate = f"{bitrate_match.group(1)}k" if bitrate_match else "192k"
+
     # Windows-specific process flags to eliminate console window spawn overhead
     creationflags = 0
     if os.name == 'nt':
@@ -39,14 +44,23 @@ def convert_m4a_to_mp3_fast(source_audio: str, mp3_path: str, title: str = "", a
         "-threads", "0",                         # Max CPU parallelism
         "-i", source_audio,
         "-vn", "-sn", "-dn",                     # Ignore video, subtitle, and data streams
+    ]
+
+    # Apply volume filter if boost is requested
+    boost_match = re.search(r'(\d+)%', volume_boost)
+    if boost_match and int(boost_match.group(1)) > 100:
+        vol_factor = int(boost_match.group(1)) / 100.0
+        cmd.extend(["-filter:a", f"volume={vol_factor}"])
+
+    cmd.extend([
         "-c:a", "libmp3lame",
-        "-b:a", "192k",                          # Fixed 192k CBR
-        "-compression_level", "9",               # 9 = Fastest LAME algorithm
+        "-b:a", bitrate,                         # Customizable CBR Bitrate
+        "-compression_level", "2",               # High quality LAME encoding
         "-ac", "2",
         "-ar", "44100",
         "-id3v2_version", "3",
         mp3_path
-    ]
+    ])
 
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, creationflags=creationflags)
     while proc.poll() is None:

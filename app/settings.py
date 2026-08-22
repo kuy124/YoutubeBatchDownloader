@@ -8,11 +8,14 @@ class Settings:
         self.settings_file = os.path.join(get_root_dir(), "settings.json")
         self.default_downloads = os.path.join(get_root_dir(), "downloads")
         
-        # Clean defaults: MP3 Audio, 480p, and all extra behaviors unchecked initially
+        # Clean defaults: Separate quality presets for videos and audios
         self.config = {
             "download_path": self.default_downloads,
-            "format": "MP3 Audio",
-            "quality": "480p",
+            "format": "MP4 Video",
+            "quality": "Best",
+            "video_quality": "Best",
+            "audio_quality": "192 kbps (High / Standard)",
+            "audio_boost": "100% (Original)",
             "auto_clear": False,
             "monitor_clipboard": False,
             "threads": max(12, (os.cpu_count() or 4) * 2)

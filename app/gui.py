@@ -9,11 +9,164 @@ import winsound  # Standard library module to trigger clean system chimes
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                                QLabel, QTextEdit, QPushButton, QComboBox, QCheckBox, 
                                QLineEdit, QFileDialog, QTableWidget, QTableWidgetItem, 
-                               QHeaderView, QProgressBar, QMessageBox, QApplication, QScrollBar, QGridLayout)
-from PySide6.QtCore import QThreadPool, Qt, QTimer, QRunnable, QObject, Signal
-from PySide6.QtGui import QBrush, QColor, QIcon, QTextCharFormat, QTextCursor
+                               QHeaderView, QProgressBar, QMessageBox, QApplication, QScrollBar, QGridLayout,
+                               QFrame, QGraphicsDropShadowEffect)
+from PySide6.QtCore import QThreadPool, Qt, QTimer, QRunnable, QObject, Signal, QPropertyAnimation, QParallelAnimationGroup, QEasingCurve, QPoint
+from PySide6.QtGui import QBrush, QColor, QIcon, QTextCharFormat, QTextCursor, QGuiApplication
 
-APP_VERSION = "v1.6.5"
+class DesktopToast(QWidget):
+    """Ultra-clean, minimalist floating card with glowing accents and smooth physics animations."""
+    def __init__(self):
+        super().__init__(None)
+        self.setWindowFlags(
+            Qt.FramelessWindowHint | 
+            Qt.WindowStaysOnTopHint | 
+            Qt.Tool | 
+            Qt.WindowDoesNotAcceptFocus
+        )
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+
+        # Main wrapper layout with padding for shadow
+        wrapper = QVBoxLayout(self)
+        wrapper.setContentsMargins(16, 16, 16, 16)
+
+        # Sleek Minimalist Container Card
+        self.card = QFrame()
+        self.card.setStyleSheet("""
+            QFrame {
+                background-color: #0b0f19;
+                border: 1.5px solid #0284c7;
+                border-radius: 12px;
+            }
+        """)
+
+        # Deep ambient drop shadow
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(24)
+        shadow.setXOffset(0)
+        shadow.setYOffset(6)
+        shadow.setColor(QColor(0, 0, 0, 220))
+        self.card.setGraphicsEffect(shadow)
+
+        card_layout = QHBoxLayout(self.card)
+        card_layout.setContentsMargins(14, 12, 16, 12)
+        card_layout.setSpacing(12)
+
+        # Vibrant Checkmark Badge
+        self.badge = QLabel("✓")
+        self.badge.setFixedSize(30, 30)
+        self.badge.setAlignment(Qt.AlignCenter)
+        self.badge.setStyleSheet("""
+            QLabel {
+                background-color: #0284c7;
+                color: #ffffff;
+                font-size: 14px;
+                font-weight: bold;
+                border-radius: 15px;
+            }
+        """)
+        card_layout.addWidget(self.badge)
+
+        # Text Section
+        text_layout = QVBoxLayout()
+        text_layout.setSpacing(2)
+
+        self.lbl_title = QLabel("Link Captured")
+        self.lbl_title.setStyleSheet("""
+            QLabel {
+                color: #38bdf8;
+                font-size: 12px;
+                font-weight: 700;
+                letter-spacing: 0.3px;
+                border: none;
+                background: transparent;
+            }
+        """)
+
+        self.lbl_body = QLabel()
+        self.lbl_body.setStyleSheet("""
+            QLabel {
+                color: #94a3b8;
+                font-size: 11px;
+                font-weight: 500;
+                border: none;
+                background: transparent;
+            }
+        """)
+        self.lbl_body.setMaximumWidth(280)
+
+        text_layout.addWidget(self.lbl_title)
+        text_layout.addWidget(self.lbl_body)
+        card_layout.addLayout(text_layout)
+
+        wrapper.addWidget(self.card)
+
+        self.timer = QTimer(self)
+        self.timer.setSingleShot(True)
+        self.timer.timeout.connect(self.fade_out)
+        self.anim_group = None
+
+    def show_notification(self, title: str, body: str, duration_ms: int = 2800):
+        self.lbl_title.setText(title)
+        self.lbl_body.setText(body)
+        self.adjustSize()
+
+        screen = QGuiApplication.primaryScreen().availableGeometry()
+        target_x = screen.right() - self.width() - 10
+        target_y = screen.bottom() - self.height() - 10
+        start_y = target_y + 18  # Starts slightly lower for upward slide
+
+        self.move(target_x, start_y)
+        self.setWindowOpacity(0.0)
+        self.show()
+
+        # Smooth Slide-Up + Fade-In animation
+        anim_pos = QPropertyAnimation(self, b"pos")
+        anim_pos.setDuration(260)
+        anim_pos.setStartValue(QPoint(target_x, start_y))
+        anim_pos.setEndValue(QPoint(target_x, target_y))
+        anim_pos.setEasingCurve(QEasingCurve.OutCubic)
+
+        anim_op = QPropertyAnimation(self, b"windowOpacity")
+        anim_op.setDuration(240)
+        anim_op.setStartValue(0.0)
+        anim_op.setEndValue(1.0)
+
+        self.anim_group = QParallelAnimationGroup(self)
+        self.anim_group.addAnimation(anim_pos)
+        self.anim_group.addAnimation(anim_op)
+        self.anim_group.start()
+
+        self.timer.start(duration_ms)
+
+    def fade_out(self):
+        curr_x = self.x()
+        curr_y = self.y()
+        end_y = curr_y + 12
+
+        # Smooth Slide-Down + Fade-Out
+        anim_pos = QPropertyAnimation(self, b"pos")
+        anim_pos.setDuration(220)
+        anim_pos.setStartValue(QPoint(curr_x, curr_y))
+        anim_pos.setEndValue(QPoint(curr_x, end_y))
+        anim_pos.setEasingCurve(QEasingCurve.InCubic)
+
+        anim_op = QPropertyAnimation(self, b"windowOpacity")
+        anim_op.setDuration(200)
+        anim_op.setStartValue(self.windowOpacity())
+        anim_op.setEndValue(0.0)
+
+        self.anim_group = QParallelAnimationGroup(self)
+        self.anim_group.addAnimation(anim_pos)
+        self.anim_group.addAnimation(anim_op)
+        self.anim_group.finished.connect(self.hide)
+        self.anim_group.start()
+
+    def mousePressEvent(self, event):
+        self.fade_out()
+
+APP_VERSION = "v1.7.0"
 
 def parse_version(ver_str: str) -> tuple:
     cleaned = re.sub(r'[^0-9.]', '', ver_str)
@@ -105,11 +258,22 @@ class MainWindow(QMainWindow):
         self.preview_timer.timeout.connect(self.fetch_title_previews)
 
         self.setup_ui()
+        self.desktop_toast = DesktopToast()
         self.apply_settings()
 
         # Connect the OS clipboard monitor signal
         self.clipboard = QApplication.clipboard()
         self.clipboard.dataChanged.connect(self.on_clipboard_changed)
+        self.chk_monitor_clip.toggled.connect(self.on_monitor_toggled)
+
+    def on_monitor_toggled(self, checked: bool):
+        if checked:
+            self.desktop_toast.show_notification(
+                "✓ Clipboard Monitor Active",
+                "Any copied YouTube links will automatically be added to your queue.",
+                2500
+            )
+        self.save_current_settings()
 
         # Trigger silent update check on startup
         QTimer.singleShot(1000, lambda: self.check_for_updates(manual=False))
@@ -275,13 +439,44 @@ class MainWindow(QMainWindow):
         opt_v_layout.addWidget(self.combo_format)
         options_layout.addLayout(opt_v_layout)
 
-        # Quality
+        # Quality Presets
+        self.video_qualities = ["Best", "4K (2160p)", "1440p (2K)", "1080p", "720p", "480p"]
+        self.audio_qualities = [
+            "320 kbps (Extreme)",
+            "256 kbps (Very High)",
+            "192 kbps (High / Standard)",
+            "128 kbps (Medium)",
+            "96 kbps (Low / Small Size)"
+        ]
+
+        # Quality (Dynamic Label & Items)
         opt_q_layout = QVBoxLayout()
-        opt_q_layout.addWidget(QLabel("Max Quality:"))
+        self.lbl_quality = QLabel("Max Resolution:")
         self.combo_quality = QComboBox()
-        self.combo_quality.addItems(["Best", "1080p", "720p", "480p"])
+        self.combo_quality.addItems(self.video_qualities)
+        opt_q_layout.addWidget(self.lbl_quality)
         opt_q_layout.addWidget(self.combo_quality)
         options_layout.addLayout(opt_q_layout)
+
+        # Switch quality options dynamically when format changes
+        self.combo_format.currentTextChanged.connect(self.on_format_changed)
+        self.combo_quality.currentTextChanged.connect(lambda: self.save_current_settings())
+
+        # Audio Boost
+        opt_b_layout = QVBoxLayout()
+        opt_b_layout.addWidget(QLabel("Audio Boost:"))
+        self.combo_boost = QComboBox()
+        self.combo_boost.addItems([
+            "100% (Original)",
+            "125% (+2 dB)",
+            "150% (+3.5 dB)",
+            "175% (+5 dB)",
+            "200% (+6 dB)",
+            "250% (+8 dB)",
+            "300% (+9.5 dB)"
+        ])
+        opt_b_layout.addWidget(self.combo_boost)
+        options_layout.addLayout(opt_b_layout)
 
         # Checkboxes Settings Block
         check_layout = QVBoxLayout()
@@ -380,17 +575,48 @@ class MainWindow(QMainWindow):
         self.statusBar = self.statusBar()
         self.update_status_summary()
 
+    def on_format_changed(self, format_name: str):
+        """Dynamically toggles quality dropdown between Video Resolutions and Audio Bitrates."""
+        self.combo_quality.blockSignals(True)
+        self.combo_quality.clear()
+        
+        if "Audio" in format_name:
+            self.lbl_quality.setText("Audio Quality:")
+            self.combo_quality.addItems(self.audio_qualities)
+            saved_audio_q = self.settings.get("audio_quality", "192 kbps (High / Standard)")
+            idx = self.combo_quality.findText(saved_audio_q)
+            self.combo_quality.setCurrentIndex(idx if idx != -1 else 0)
+        else:
+            self.lbl_quality.setText("Max Resolution:")
+            self.combo_quality.addItems(self.video_qualities)
+            saved_video_q = self.settings.get("video_quality", "Best")
+            idx = self.combo_quality.findText(saved_video_q)
+            self.combo_quality.setCurrentIndex(idx if idx != -1 else 0)
+            
+        self.combo_quality.blockSignals(False)
+
     def apply_settings(self):
         self.entry_path.setText(self.settings.get("download_path"))
-        self.combo_format.setCurrentText(self.settings.get("format"))
-        self.combo_quality.setCurrentText(self.settings.get("quality"))
+        saved_format = self.settings.get("format", "MP4 Video")
+        self.combo_format.setCurrentText(saved_format)
+        self.on_format_changed(saved_format)
+        self.combo_boost.setCurrentText(self.settings.get("audio_boost", "100% (Original)"))
         self.chk_auto_clear.setChecked(self.settings.get("auto_clear"))
         self.chk_monitor_clip.setChecked(self.settings.get("monitor_clipboard"))
 
     def save_current_settings(self):
+        fmt = self.combo_format.currentText()
+        current_q = self.combo_quality.currentText()
         self.settings.set("download_path", self.entry_path.text())
-        self.settings.set("format", self.combo_format.currentText())
-        self.settings.set("quality", self.combo_quality.currentText())
+        self.settings.set("format", fmt)
+        self.settings.set("quality", current_q)
+        
+        if "Audio" in fmt:
+            self.settings.set("audio_quality", current_q)
+        else:
+            self.settings.set("video_quality", current_q)
+            
+        self.settings.set("audio_boost", self.combo_boost.currentText())
         self.settings.set("auto_clear", self.chk_auto_clear.isChecked())
         self.settings.set("monitor_clipboard", self.chk_monitor_clip.isChecked())
 
@@ -437,6 +663,14 @@ class MainWindow(QMainWindow):
                 else:
                     self.url_input.setPlainText(text)
                 log.info(f"Clipboard Monitor dynamically added link: {text}")
+                
+                # Pop up directly on the Windows desktop (bottom-right above taskbar)
+                display_url = text if len(text) <= 48 else text[:45] + "..."
+                self.desktop_toast.show_notification(
+                    "✓ YouTube Link Added to Queue",
+                    display_url,
+                    2800
+                )
 
     def on_table_double_clicked(self, row, column):
         """Allows double-clicking any complete row to play the downloaded file."""
@@ -732,6 +966,7 @@ class MainWindow(QMainWindow):
             'download_path': self.entry_path.text(),
             'format': self.combo_format.currentText(),
             'quality': self.combo_quality.currentText(),
+            'audio_boost': self.combo_boost.currentText(),
             'queued_time': self.batch_start_time
         }
 
