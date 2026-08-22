@@ -413,11 +413,14 @@ class DownloadWorker(QRunnable):
         audio_bitrate_num = parsed_num if (parsed_num and "Audio" in fmt) else "192"
         audio_bitrate_str = f"{audio_bitrate_num}k"
         
-        # Build strict highest-resolution format string
+        # Audio track selector: Strictly enforces original creator track and drops AI auto-dubs
+        orig_ba = "(ba[format_note*=original]/ba[language=orig]/ba)"
+
+        # Build strict highest-resolution format string with original audio
         if max_h:
-            video_format = f"bv*[height<={max_h}]+ba/b[height<={max_h}]/bv*+ba/b"
+            video_format = f"bv*[height<={max_h}]+{orig_ba}/b[height<={max_h}]/bv*+{orig_ba}/b"
         else:
-            video_format = "bv*+ba/b"
+            video_format = f"bv*+{orig_ba}/bv*+ba/b"
 
         if not ffmpeg_path:
             self.signals.error.emit(self.task_id, "Failed: FFmpeg binary missing in tools/. Please run install.bat.")
@@ -425,11 +428,11 @@ class DownloadWorker(QRunnable):
         else:
             if fmt == "MP3 Audio":
                 ydl_opts['writethumbnail'] = False
-                ydl_opts['format'] = 'bestaudio/best'
+                ydl_opts['format'] = 'ba[format_note*=original]/ba[language=orig]/ba'
                 ydl_opts['postprocessors'] = []
             elif fmt == "M4A Audio":
                 ydl_opts['writethumbnail'] = True
-                ydl_opts['format'] = 'bestaudio[ext=m4a]/bestaudio/best'
+                ydl_opts['format'] = 'ba[format_note*=original][ext=m4a]/ba[ext=m4a]/ba[format_note*=original]/ba'
                 ydl_opts['postprocessors'] = [
                     {'key': 'FFmpegExtractAudio', 'preferredcodec': 'm4a', 'preferredquality': audio_bitrate_num},
                     {'key': 'FFmpegMetadata', 'add_metadata': True},
@@ -439,7 +442,7 @@ class DownloadWorker(QRunnable):
                 if has_boost:
                     ydl_opts['postprocessor_args'] = {'extractaudio': ['-filter:a', f'volume={vol_mult}']}
             elif fmt == "WAV Audio":
-                ydl_opts['format'] = 'bestaudio/best'
+                ydl_opts['format'] = 'ba[format_note*=original]/ba[language=orig]/ba'
                 ydl_opts['postprocessors'] = [
                     {'key': 'FFmpegExtractAudio', 'preferredcodec': 'wav'},
                     {'key': 'FFmpegMetadata', 'add_metadata': True}
@@ -448,7 +451,7 @@ class DownloadWorker(QRunnable):
                     ydl_opts['postprocessor_args'] = {'extractaudio': ['-filter:a', f'volume={vol_mult}']}
             elif fmt == "FLAC Audio":
                 ydl_opts['writethumbnail'] = True
-                ydl_opts['format'] = 'bestaudio/best'
+                ydl_opts['format'] = 'ba[format_note*=original]/ba[language=orig]/ba'
                 ydl_opts['postprocessors'] = [
                     {'key': 'FFmpegExtractAudio', 'preferredcodec': 'flac'},
                     {'key': 'FFmpegMetadata', 'add_metadata': True},
@@ -458,7 +461,7 @@ class DownloadWorker(QRunnable):
                 if has_boost:
                     ydl_opts['postprocessor_args'] = {'extractaudio': ['-filter:a', f'volume={vol_mult}']}
             elif fmt == "AAC Audio":
-                ydl_opts['format'] = 'bestaudio[ext=m4a]/bestaudio/best'
+                ydl_opts['format'] = 'ba[format_note*=original][ext=m4a]/ba[ext=m4a]/ba[format_note*=original]/ba'
                 ydl_opts['postprocessors'] = [
                     {'key': 'FFmpegExtractAudio', 'preferredcodec': 'aac', 'preferredquality': audio_bitrate_num},
                     {'key': 'FFmpegMetadata', 'add_metadata': True}
@@ -467,7 +470,7 @@ class DownloadWorker(QRunnable):
                     ydl_opts['postprocessor_args'] = {'extractaudio': ['-filter:a', f'volume={vol_mult}']}
             elif fmt == "OPUS Audio":
                 ydl_opts['writethumbnail'] = True
-                ydl_opts['format'] = 'bestaudio[ext=webm]/bestaudio/best'
+                ydl_opts['format'] = 'ba[format_note*=original][ext=webm]/ba[ext=webm]/ba[format_note*=original]/ba'
                 ydl_opts['postprocessors'] = [
                     {'key': 'FFmpegExtractAudio', 'preferredcodec': 'opus', 'preferredquality': audio_bitrate_num},
                     {'key': 'FFmpegMetadata', 'add_metadata': True},
