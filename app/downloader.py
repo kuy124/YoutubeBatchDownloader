@@ -485,43 +485,55 @@ class DownloadWorker(QRunnable):
                 ydl_opts['format_sort_force'] = True
                 ydl_opts['merge_output_format'] = 'mp4'
                 ydl_opts['postprocessors'] = [{'key': 'FFmpegMetadata', 'add_metadata': True}]
+                # Always transcode audio to universal AAC (never leave Opus in MP4)
+                merger_args = ['-c:v', 'copy', '-c:a', 'aac', '-b:a', audio_bitrate_str]
                 if has_boost:
-                    ydl_opts['postprocessor_args'] = {'merger': ['-c:v', 'copy', '-c:a', 'aac', '-filter:a', f'volume={vol_mult}']}
+                    merger_args.extend(['-filter:a', f'volume={vol_mult}'])
+                ydl_opts['postprocessor_args'] = {'merger': merger_args}
             elif fmt == "WEBM Video":
                 ydl_opts['format'] = video_format
                 ydl_opts['format_sort'] = ['res', 'fps', 'quality']
                 ydl_opts['format_sort_force'] = True
                 ydl_opts['merge_output_format'] = 'webm'
                 ydl_opts['postprocessors'] = [{'key': 'FFmpegMetadata', 'add_metadata': True}]
+                merger_args = ['-c:v', 'copy', '-c:a', 'libopus', '-b:a', audio_bitrate_str]
                 if has_boost:
-                    ydl_opts['postprocessor_args'] = {'merger': ['-c:v', 'copy', '-c:a', 'libopus', '-filter:a', f'volume={vol_mult}']}
+                    merger_args.extend(['-filter:a', f'volume={vol_mult}'])
+                ydl_opts['postprocessor_args'] = {'merger': merger_args}
             elif fmt == "AVI Video":
                 ydl_opts['format'] = video_format
                 ydl_opts['format_sort'] = ['res', 'fps', 'quality']
                 ydl_opts['format_sort_force'] = True
                 ydl_opts['merge_output_format'] = 'avi'
                 ydl_opts['postprocessors'] = [{'key': 'FFmpegVideoConvertor', 'preferedformat': 'avi'}, {'key': 'FFmpegMetadata', 'add_metadata': True}]
+                # Always transcode audio to MP3 for universal AVI compatibility
+                merger_args = ['-c:v', 'copy', '-c:a', 'libmp3lame', '-b:a', audio_bitrate_str]
                 if has_boost:
-                    ydl_opts['postprocessor_args'] = {
-                        'merger': ['-c:v', 'copy', '-c:a', 'libmp3lame', '-filter:a', f'volume={vol_mult}'],
-                        'videoconvertor': ['-filter:a', f'volume={vol_mult}']
-                    }
+                    merger_args.extend(['-filter:a', f'volume={vol_mult}'])
+                ydl_opts['postprocessor_args'] = {
+                    'merger': merger_args,
+                    'videoconvertor': ['-filter:a', f'volume={vol_mult}'] if has_boost else []
+                }
             elif fmt == "MOV Video":
                 ydl_opts['format'] = video_format
                 ydl_opts['format_sort'] = ['res', 'fps', 'quality']
                 ydl_opts['format_sort_force'] = True
                 ydl_opts['merge_output_format'] = 'mov'
                 ydl_opts['postprocessors'] = [{'key': 'FFmpegMetadata', 'add_metadata': True}]
+                merger_args = ['-c:v', 'copy', '-c:a', 'aac', '-b:a', audio_bitrate_str]
                 if has_boost:
-                    ydl_opts['postprocessor_args'] = {'merger': ['-c:v', 'copy', '-c:a', 'aac', '-filter:a', f'volume={vol_mult}']}
+                    merger_args.extend(['-filter:a', f'volume={vol_mult}'])
+                ydl_opts['postprocessor_args'] = {'merger': merger_args}
             else:  # Best Quality (MKV)
                 ydl_opts['format'] = video_format
                 ydl_opts['format_sort'] = ['res', 'fps', 'quality', 'size', 'br']
                 ydl_opts['format_sort_force'] = True
                 ydl_opts['merge_output_format'] = 'mkv'
                 ydl_opts['postprocessors'] = [{'key': 'FFmpegMetadata', 'add_metadata': True}]
+                merger_args = ['-c:v', 'copy', '-c:a', 'aac', '-b:a', audio_bitrate_str]
                 if has_boost:
-                    ydl_opts['postprocessor_args'] = {'merger': ['-c:v', 'copy', '-c:a', 'aac', '-filter:a', f'volume={vol_mult}']}
+                    merger_args.extend(['-filter:a', f'volume={vol_mult}'])
+                ydl_opts['postprocessor_args'] = {'merger': merger_args}
 
         # --- Automatic Background Retry Loop ---
         max_auto_retries = 3
