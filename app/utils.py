@@ -76,6 +76,29 @@ def format_display_title(title: str, uploader: str) -> str:
     return title
 
 
+def resolve_uploader(info_dict: dict) -> str:
+    """Picks the best artist attribution from a yt-dlp info dict."""
+    return info_dict.get('artist') or info_dict.get('uploader') or info_dict.get('creator') or info_dict.get('channel') or ''
+
+
+def format_hms(total_seconds) -> str:
+    """Formats a duration in seconds as MM:SS or HH:MM:SS."""
+    total_seconds = int(total_seconds)
+    mins, secs = divmod(total_seconds, 60)
+    hours, mins = divmod(mins, 60)
+    if hours > 0:
+        return f"{hours:02d}:{mins:02d}:{secs:02d}"
+    return f"{mins:02d}:{secs:02d}"
+
+
+def format_elapsed_words(total_seconds: int) -> str:
+    """Formats a duration in seconds as human-readable words, e.g. '2 minutes and 5 seconds'."""
+    mins, secs = divmod(int(total_seconds), 60)
+    if mins > 0:
+        return f"{mins} minute{'s' if mins != 1 else ''} and {secs} second{'s' if secs != 1 else ''}"
+    return f"{secs} second{'s' if secs != 1 else ''}"
+
+
 def insecure_ssl_context() -> ssl.SSLContext:
     """Creates an SSL context tolerant of certificate issues on end-user machines."""
     ctx = ssl.create_default_context()
