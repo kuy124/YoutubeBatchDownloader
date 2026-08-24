@@ -5,6 +5,7 @@ import urllib.request
 import yt_dlp
 from PySide6.QtCore import QRunnable, QObject, Signal
 from .utils import (
+    build_audio_boost_filter,
     clean_youtube_url,
     fetch_oembed_title,
     format_display_title,
@@ -14,7 +15,7 @@ from .utils import (
     is_youtube_url,
 )
 from .logger import log
-from .converter import convert_m4a_to_mp3_fast
+from .converter import convert_m4a_to_mp3_fast, embed_wav_metadata
 
 class TitlePreviewSignals(QObject):
     fetched = Signal(list)
@@ -157,14 +158,15 @@ _THUMBNAIL_POSTPROCESSORS = [
     {'key': 'EmbedThumbnail', 'already_have_thumbnail': False},
 ]
 
-# Video containers: name -> (merge container, merged audio codec, format sort priority)
+# Video containers: name -> (merge container, merged audio codec, format sort priority, embeds cover art)
+# WEBM and AVI cannot carry attached artwork, so those skip thumbnail embedding.
 _VIDEO_FORMATS = {
-    "MP4 Video": ('mp4', 'aac', ['res', 'fps', 'quality', 'size', 'br']),
-    "WEBM Video": ('webm', 'libopus', ['res', 'fps', 'quality']),
-    "AVI Video": ('avi', 'libmp3lame', ['res', 'fps', 'quality']),
-    "MOV Video": ('mov', 'aac', ['res', 'fps', 'quality']),
+    "MP4 Video": ('mp4', 'aac', ['res', 'fps', 'quality', 'size', 'br'], True),
+    "WEBM Video": ('webm', 'libopus', ['res', 'fps', 'quality'], False),
+    "AVI Video": ('avi', 'libmp3lame', ['res', 'fps', 'quality'], False),
+    "MOV Video": ('mov', 'aac', ['res', 'fps', 'quality'], True),
 }
-_BEST_QUALITY_VIDEO = ('mkv', 'aac', ['res', 'fps', 'quality', 'size', 'br'])
+_BEST_QUALITY_VIDEO = ('mkv', 'aac', ['res', 'fps', 'quality', 'size', 'br'], True)
 
 
 def build_video_format_string(max_h) -> str:
@@ -174,23 +176,23 @@ def build_video_format_string(max_h) -> str:
     return f"bv*+{_ORIGINAL_BA}/bv*+ba/b"
 
 
-def build_audio_postprocessor_args(has_boost: bool, vol_mult: float) -> dict:
-    """Postprocessor arguments applying the volume filter during audio extraction."""
-    if has_boost:
-        return {'extractaudio': ['-filter:a', f'volume={vol_mult}']}
+def build_audio_postprocessor_args(boost_filter) -> dict:
+    """Postprocessor arguments applying the boost/limit filter during audio extraction."""
+    if boost_filter:
+        return {'extractaudio': ['-filter:a', boost_filter]}
     return {}
 
 
-def build_merger_args(audio_codec: str, audio_bitrate_str: str, has_boost: bool, vol_mult: float) -> list:
+def build_merger_args(audio_codec: str, audio_bitrate_str: str, boost_filter) -> list:
     """FFmpeg merger arguments keeping video untouched while normalizing the audio codec."""
     merger_args = ['-c:v', 'copy', '-c:a', audio_codec, '-b:a', audio_bitrate_str]
-    if has_boost:
-        merger_args.extend(['-filter:a', f'volume={vol_mult}'])
+    if boost_filter:
+        merger_args.extend(['-filter:a', boost_filter])
     return merger_args
 
 
 def build_format_options(fmt: str, video_format: str, audio_bitrate_num, audio_bitrate_str: str,
-                         has_boost: bool, vol_mult: float) -> dict:
+                         boost_filter) -> dict:
     """Declarative yt-dlp option overrides for the selected output format."""
     if fmt in _AUDIO_FORMATS:
         selector, codec, with_thumb = _AUDIO_FORMATS[fmt]
@@ -208,24 +210,37 @@ def build_format_options(fmt: str, video_format: str, audio_bitrate_num, audio_b
                 {'key': 'FFmpegMetadata', 'add_metadata': True},
                 *( _THUMBNAIL_POSTPROCESSORS if with_thumb else [] )
             ]
-        pp_args = build_audio_postprocessor_args(has_boost, vol_mult)
+        pp_args = build_audio_postprocessor_args(boost_filter)
         if pp_args:
             opts['postprocessor_args'] = pp_args
         return opts
 
-    container, audio_codec, format_sort = _VIDEO_FORMATS.get(fmt, _BEST_QUALITY_VIDEO)
+    container, audio_codec, format_sort, with_thumb = _VIDEO_FORMATS.get(fmt, _BEST_QUALITY_VIDEO)
     opts = {
         'format': video_format,
         'format_sort': list(format_sort),
         'format_sort_force': True,
         'merge_output_format': container,
-        'postprocessors': [{'key': 'FFmpegMetadata', 'add_metadata': True}],
     }
-    pp_args = {'merger': build_merger_args(audio_codec, audio_bitrate_str, has_boost, vol_mult)}
-    if fmt == "AVI Video" and has_boost:
-        pp_args['videoconvertor'] = ['-filter:a', f'volume={vol_mult}']
+    postprocessors = [{'key': 'FFmpegMetadata', 'add_metadata': True}]
+    if with_thumb:
+        # Embeds cover art so Explorer tiles and media players display artwork
+        opts['writethumbnail'] = True
+        postprocessors += _THUMBNAIL_POSTPROCESSORS
+    opts['postprocessors'] = postprocessors
+
+    pp_args = {'merger': build_merger_args(audio_codec, audio_bitrate_str, boost_filter)}
+    if fmt == "AVI Video" and boost_filter:
+        pp_args['videoconvertor'] = ['-filter:a', boost_filter]
     opts['postprocessor_args'] = pp_args
     return opts
+
+
+def extract_media_tags(info_dict: dict) -> tuple:
+    """Returns (title, artist), preferring dedicated music artist metadata fields."""
+    title = info_dict.get('title', '') or ''
+    artist = info_dict.get('artist') or info_dict.get('uploader') or info_dict.get('channel') or ''
+    return title, artist
 
 
 class DownloadWorker(QRunnable):
@@ -395,6 +410,28 @@ class DownloadWorker(QRunnable):
         except Exception as ex:
             log.error(f"Error during file cleanup: {ex}")
 
+    def download_thumbnail(self, info_dict: dict, base_path: str):
+        """Downloads the best thumbnail as a genuine JPEG next to the output file."""
+        thumb_url = info_dict.get('thumbnail')
+        if not thumb_url and info_dict.get('thumbnails'):
+            thumb_url = info_dict['thumbnails'][-1].get('url')
+        if not thumb_url or self.is_cancelled:
+            return None
+
+        try:
+            thumb_path = base_path + '.jpg'
+            req = urllib.request.Request(thumb_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+            with urllib.request.urlopen(req, timeout=2, context=insecure_ssl_context()) as resp:
+                raw_bytes = resp.read()
+
+            # Re-encode WebP/PNG payloads into a standard JPEG
+            with open(thumb_path, 'wb') as f:
+                f.write(image_to_jpeg_bytes(raw_bytes))
+            return thumb_path
+        except Exception as ex:
+            log.debug(f"Thumbnail download notice: {ex}")
+            return None
+
     def run(self):
         log.info(f"Starting stream download task {self.task_id} for URL: {self.url}")
 
@@ -450,10 +487,7 @@ class DownloadWorker(QRunnable):
         fmt = self.options.get('format', 'Best Quality (MKV)')
         quality = self.options.get('quality', 'Best')
         boost_str = self.options.get('audio_boost', '100% (Original)')
-        boost_match = re.search(r'(\d+)%', boost_str)
-        vol_pct = int(boost_match.group(1)) if boost_match else 100
-        vol_mult = vol_pct / 100.0
-        has_boost = vol_pct > 100
+        boost_filter = build_audio_boost_filter(boost_str)
 
         # Numeric parser for video resolution (height) & audio bitrate
         num_match = re.search(r'(\d+)', quality)
@@ -470,7 +504,7 @@ class DownloadWorker(QRunnable):
             return
 
         ydl_opts.update(build_format_options(
-            fmt, video_format, audio_bitrate_num, audio_bitrate_str, has_boost, vol_mult
+            fmt, video_format, audio_bitrate_num, audio_bitrate_str, boost_filter
         ))
 
         # --- Automatic Background Retry Loop ---
@@ -510,33 +544,17 @@ class DownloadWorker(QRunnable):
                             'status_text': 'Converting...',
                             'is_postprocessing': True
                         })
-                        
-                        # Universal Thumbnail Fetcher (Converts WebP/PNG -> Genuine JPEG)
-                        thumb_url = info_dict.get('thumbnail')
-                        if not thumb_url and info_dict.get('thumbnails'):
-                            thumb_url = info_dict['thumbnails'][-1].get('url')
 
-                        if thumb_url and not self.is_cancelled:
-                            try:
-                                thumb_path = base_path + '.jpg'
-                                req = urllib.request.Request(thumb_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
-                                with urllib.request.urlopen(req, timeout=2, context=insecure_ssl_context()) as resp:
-                                    raw_bytes = resp.read()
-
-                                raw_bytes = image_to_jpeg_bytes(raw_bytes)
-                                with open(thumb_path, 'wb') as f:
-                                    f.write(raw_bytes)
-                            except Exception as ex:
-                                log.debug(f"Thumbnail download notice: {ex}")
+                        # Universal Thumbnail Fetcher for the ID3 cover art pass
+                        self.download_thumbnail(info_dict, base_path)
 
                         if self.is_cancelled:
                             self.cleanup_partial_files(source_file)
                             self.signals.error.emit(self.task_id, "Cancelled.")
                             return
 
-                        title = info_dict.get('title', '')
-                        artist = info_dict.get('artist') or info_dict.get('uploader') or info_dict.get('channel') or ''
-                        
+                        title, artist = extract_media_tags(info_dict)
+
                         success = convert_m4a_to_mp3_fast(
                             source_file, mp3_path, title=title, artist=artist,
                             is_cancelled_cb=lambda: self.is_cancelled,
@@ -583,10 +601,9 @@ class DownloadWorker(QRunnable):
                             '-i', downloaded_file,
                             '-vn'
                         ]
-                        if has_boost:
-                            aac_cmd.extend(['-c:a', 'aac', '-b:a', audio_bitrate_str, '-filter:a', f'volume={vol_mult}'])
-                        else:
-                            aac_cmd.extend(['-c:a', 'aac', '-b:a', audio_bitrate_str])
+                        aac_cmd.extend(['-c:a', 'aac', '-b:a', audio_bitrate_str])
+                        if boost_filter:
+                            aac_cmd.extend(['-filter:a', boost_filter])
                         aac_cmd.extend([
                             '-map_metadata', '0',
                             '-write_id3v2', '1',
@@ -615,6 +632,43 @@ class DownloadWorker(QRunnable):
                         if os.path.exists(aac_path):
                             try:
                                 os.remove(downloaded_file)
+                            except Exception:
+                                pass
+
+                # Embed title/artist/cover art into the WAV ID3 chunk; yt-dlp cannot
+                # attach thumbnails to .wav, so this is done manually via mutagen
+                if fmt == "WAV Audio" and info_dict:
+                    if self.is_cancelled:
+                        self.cleanup_partial_files(self.final_filename)
+                        self.signals.error.emit(self.task_id, "Cancelled.")
+                        return
+
+                    wav_file = ydl.prepare_filename(info_dict)
+                    if wav_file and not wav_file.endswith('.wav'):
+                        wav_file = os.path.splitext(wav_file)[0] + '.wav'
+
+                    if os.path.exists(wav_file):
+                        self.signals.progress.emit(self.task_id, {
+                            'status_text': 'Embedding Album Art...',
+                            'is_postprocessing': True
+                        })
+
+                        base_path = os.path.splitext(wav_file)[0]
+                        thumb_path = self.download_thumbnail(info_dict, base_path)
+
+                        if self.is_cancelled:
+                            self.cleanup_partial_files(thumb_path)
+                            self.cleanup_partial_files(self.final_filename)
+                            self.signals.error.emit(self.task_id, "Cancelled.")
+                            return
+
+                        title, artist = extract_media_tags(info_dict)
+                        embed_wav_metadata(wav_file, thumb_path=thumb_path,
+                                           title=title, artist=artist)
+
+                        if thumb_path and os.path.exists(thumb_path):
+                            try:
+                                os.remove(thumb_path)
                             except Exception:
                                 pass
 

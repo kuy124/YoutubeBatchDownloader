@@ -5,7 +5,44 @@ import subprocess
 from mutagen.mp3 import MP3
 from mutagen.id3 import ID3, TIT2, TPE1, APIC, ID3NoHeaderError
 from .logger import log
-from .utils import get_ffmpeg_path, image_to_jpeg_bytes
+from .utils import build_audio_boost_filter, get_ffmpeg_path, image_to_jpeg_bytes
+
+
+def embed_wav_metadata(wav_path: str, thumb_path: str = None, title: str = "", artist: str = "") -> bool:
+    """
+    Embeds ID3 title/artist/cover art into a WAV file's ID3 chunk via mutagen,
+    so media players and Explorer display the artwork. yt-dlp cannot do this natively.
+    """
+    try:
+        from mutagen.id3 import TIT2, TPE1, APIC
+        from mutagen.wave import WAVE
+
+        audio = WAVE(wav_path)
+        if audio.tags is None:
+            audio.add_tags()
+        tags = audio.tags
+
+        if title:
+            tags.add(TIT2(encoding=3, text=title))
+        if artist:
+            tags.add(TPE1(encoding=3, text=artist))
+
+        if thumb_path and os.path.exists(thumb_path):
+            with open(thumb_path, 'rb') as img_f:
+                tags.add(APIC(
+                    encoding=3,
+                    mime='image/jpeg',
+                    type=3,  # Front cover
+                    desc='Cover',
+                    data=image_to_jpeg_bytes(img_f.read())
+                ))
+
+        tags.update_to_v23()
+        audio.save()
+        return True
+    except Exception as tag_err:
+        log.debug(f"WAV metadata embed notice: {tag_err}")
+        return False
 
 def convert_m4a_to_mp3_fast(source_audio: str, mp3_path: str, title: str = "", artist: str = "", is_cancelled_cb=None, volume_boost: str = "100% (Original)", quality: str = "192 kbps") -> bool:
     """
@@ -45,11 +82,10 @@ def convert_m4a_to_mp3_fast(source_audio: str, mp3_path: str, title: str = "", a
         "-vn", "-sn", "-dn",                     # Ignore video, subtitle, and data streams
     ]
 
-    # Apply volume filter if boost is requested
-    boost_match = re.search(r'(\d+)%', volume_boost)
-    if boost_match and int(boost_match.group(1)) > 100:
-        vol_factor = int(boost_match.group(1)) / 100.0
-        cmd.extend(["-filter:a", f"volume={vol_factor}"])
+    # Apply the soft-limited volume boost chain if requested
+    boost_filter = build_audio_boost_filter(volume_boost)
+    if boost_filter:
+        cmd.extend(["-filter:a", boost_filter])
 
     cmd.extend([
         "-c:a", "libmp3lame",

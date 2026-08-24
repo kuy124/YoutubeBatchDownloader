@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import json
 import shutil
@@ -81,6 +82,23 @@ def insecure_ssl_context() -> ssl.SSLContext:
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
     return ctx
+
+
+def build_audio_boost_filter(boost_str: str) -> str | None:
+    """
+    Builds an FFmpeg audio filter chain that boosts the volume and then
+    soft-limits the peaks, preventing the hard clipping distortion of a raw
+    volume boost. Returns None when no boost is requested.
+    """
+    match = re.search(r'(\d+)%', boost_str or '')
+    vol_pct = int(match.group(1)) if match else 100
+    if vol_pct <= 100:
+        return None
+    return (
+        f"volume={vol_pct / 100.0:.2f}"
+        # level=disabled stops alimiter re-normalizing the signal back to full scale
+        ",alimiter=level_in=1:level_out=1:limit=0.95:attack=5:release=80:level=disabled"
+    )
 
 
 def fetch_oembed_title(clean_url: str) -> str | None:
