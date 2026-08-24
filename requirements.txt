@@ -1,3 +1,5 @@
-PySide6>=6.6.0
+# Essentials-only wheel: ships QtCore/QtGui/QtWidgets without the unused
+# heavy addon modules (WebEngine, Multimedia, Charts, 3D, ...) (~90MB lighter)
+PySide6-Essentials>=6.6.0
 yt-dlp>=2023.11.16
 mutagen>=1.47.0
