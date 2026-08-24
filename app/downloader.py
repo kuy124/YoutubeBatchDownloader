@@ -1,16 +1,22 @@
 import os
-import time  # Used for cooling-off pause during automatic retries
 import re
+import time  # Used for cooling-off pause during automatic retries
 import yt_dlp
 from PySide6.QtCore import QRunnable, QObject, Signal
-from .utils import get_ffmpeg_path
+from .utils import (
+    clean_youtube_url,
+    fetch_oembed_title,
+    format_display_title,
+    get_ffmpeg_path,
+    image_to_jpeg_bytes,
+    insecure_ssl_context,
+    is_youtube_url,
+)
 from .logger import log
 from .converter import convert_m4a_to_mp3_fast
 
 class TitlePreviewSignals(QObject):
     fetched = Signal(list)
-
-from urllib.parse import urlparse, parse_qs
 
 class TitlePreviewWorker(QRunnable):
     def __init__(self, raw_lines: list):
@@ -18,47 +24,19 @@ class TitlePreviewWorker(QRunnable):
         self.raw_lines = raw_lines
         self.signals = TitlePreviewSignals()
 
-    def _clean_url(self, url: str) -> str:
-        """Strips mix/playlist parameters to ensure single video metadata is fetched."""
-        if "youtube.com/watch" in url and "v=" in url:
-            parsed = urlparse(url)
-            qs = parse_qs(parsed.query)
-            if 'v' in qs:
-                return f"https://www.youtube.com/watch?v={qs['v'][0]}"
-        return url
-
     def _fetch_single_title(self, line: str) -> str:
         line = line.strip()
         if not line:
             return ""
-        if "youtube.com/" not in line and "youtu.be/" not in line:
+        if not is_youtube_url(line):
             return "Invalid URL"
 
-        clean_url = self._clean_url(line)
+        clean_url = clean_youtube_url(line)
 
         # FAST PATH 1: Ultra-fast 50ms YouTube oEmbed JSON API
-        import urllib.request
-        import urllib.parse
-        import json
-        import ssl
-        try:
-            ssl_ctx = ssl.create_default_context()
-            ssl_ctx.check_hostname = False
-            ssl_ctx.verify_mode = ssl.CERT_NONE
-
-            oembed_url = f"https://www.youtube.com/oembed?url={urllib.parse.quote(clean_url, safe='')}&format=json"
-            req = urllib.request.Request(oembed_url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=3, context=ssl_ctx) as resp:
-                if resp.status == 200:
-                    data = json.loads(resp.read().decode('utf-8'))
-                    title = data.get('title', '')
-                    uploader = data.get('author_name', '')
-                    if title:
-                        if uploader and uploader.lower() not in title.lower():
-                            return f"{uploader} - {title}"
-                        return title
-        except Exception:
-            pass
+        oembed_title = fetch_oembed_title(clean_url)
+        if oembed_title:
+            return oembed_title
 
         # FAST PATH 2: Fallback to lightweight yt-dlp
         ydl_opts = {
@@ -78,9 +56,7 @@ class TitlePreviewWorker(QRunnable):
                     return "Failed to load title"
                 title = info.get('title', 'Unknown Title')
                 uploader = info.get('artist') or info.get('uploader') or info.get('creator') or info.get('channel')
-                if uploader and uploader.lower() not in title.lower():
-                    return f"{uploader} - {title}"
-                return title
+                return format_display_title(title, uploader)
         except Exception:
             return "Failed to load title"
 
@@ -109,46 +85,19 @@ class MetadataWorker(QRunnable):
         self.url = url
         self.signals = MetadataSignals()
 
-    def _clean_url(self, url: str) -> str:
-        if "youtube.com/watch" in url and "v=" in url:
-            parsed = urlparse(url)
-            qs = parse_qs(parsed.query)
-            if 'v' in qs:
-                return f"https://www.youtube.com/watch?v={qs['v'][0]}"
-        return url
-
     def run(self):
         t0 = time.time()
-        clean_url = self._clean_url(self.url)
+        clean_url = clean_youtube_url(self.url)
 
         # FAST PATH 1: Ultra-fast 50ms YouTube oEmbed JSON API
-        import urllib.request
-        import urllib.parse
-        import json
-        import ssl
-        try:
-            ssl_ctx = ssl.create_default_context()
-            ssl_ctx.check_hostname = False
-            ssl_ctx.verify_mode = ssl.CERT_NONE
-
-            oembed_url = f"https://www.youtube.com/oembed?url={urllib.parse.quote(clean_url, safe='')}&format=json"
-            req = urllib.request.Request(oembed_url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=3, context=ssl_ctx) as resp:
-                if resp.status == 200:
-                    data = json.loads(resp.read().decode('utf-8'))
-                    title = data.get('title', '')
-                    uploader = data.get('author_name', '')
-                    if title:
-                        display_title = f"{uploader} - {title}" if uploader and uploader.lower() not in title.lower() else title
-                        extraction_time = time.time() - t0
-                        self.signals.finished.emit(self.task_id, {
-                            'title': display_title,
-                            'file_size': 0,
-                            'extraction_time': extraction_time
-                        })
-                        return
-        except Exception:
-            pass
+        oembed_title = fetch_oembed_title(clean_url)
+        if oembed_title:
+            self.signals.finished.emit(self.task_id, {
+                'title': oembed_title,
+                'file_size': 0,
+                'extraction_time': time.time() - t0
+            })
+            return
 
         # FAST PATH 2: Fallback to yt-dlp
         ydl_opts = {
@@ -169,10 +118,9 @@ class MetadataWorker(QRunnable):
                 if info:
                     title = info.get('title', 'Unknown Title')
                     uploader = info.get('artist') or info.get('uploader') or info.get('creator') or info.get('channel')
-                    display_title = f"{uploader} - {title}" if uploader and uploader.lower() not in title.lower() else title
                     file_size = info.get('filesize') or info.get('filesize_approx') or 0
                     self.signals.finished.emit(self.task_id, {
-                        'title': display_title,
+                        'title': format_display_title(title, uploader),
                         'file_size': file_size,
                         'extraction_time': extraction_time
                     })
@@ -306,11 +254,8 @@ class DownloadWorker(QRunnable):
                 'filename': d.get('filename', 'Unknown')
             }
             if title:
-                if uploader and uploader.lower() not in title.lower():
-                    data['title'] = f"{uploader} - {title}"
-                else:
-                    data['title'] = title
-                
+                data['title'] = format_display_title(title, uploader)
+
             self.signals.progress.emit(self.task_id, data)
 
     def cleanup_partial_files(self, filepath: str):
@@ -581,27 +526,13 @@ class DownloadWorker(QRunnable):
                         if thumb_url and not self.is_cancelled:
                             try:
                                 import urllib.request
-                                import ssl
-                                from PySide6.QtGui import QImage
-                                from PySide6.QtCore import QBuffer, QIODevice
 
-                                ssl_ctx = ssl.create_default_context()
-                                ssl_ctx.check_hostname = False
-                                ssl_ctx.verify_mode = ssl.CERT_NONE
-                                
                                 thumb_path = base_path + '.jpg'
                                 req = urllib.request.Request(thumb_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
-                                with urllib.request.urlopen(req, timeout=2, context=ssl_ctx) as resp:
+                                with urllib.request.urlopen(req, timeout=2, context=insecure_ssl_context()) as resp:
                                     raw_bytes = resp.read()
 
-                                # Convert WebP -> Standard JPEG using PySide6 QImage engine
-                                qimg = QImage()
-                                if qimg.loadFromData(raw_bytes):
-                                    buf = QBuffer()
-                                    buf.open(QIODevice.WriteOnly)
-                                    if qimg.save(buf, "JPEG"):
-                                        raw_bytes = buf.data().data()
-
+                                raw_bytes = image_to_jpeg_bytes(raw_bytes)
                                 with open(thumb_path, 'wb') as f:
                                     f.write(raw_bytes)
                             except Exception as ex:

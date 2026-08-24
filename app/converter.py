@@ -4,7 +4,7 @@ import subprocess
 from mutagen.mp3 import MP3
 from mutagen.id3 import ID3, TIT2, TPE1, APIC, ID3NoHeaderError
 from .logger import log
-from .utils import get_ffmpeg_path
+from .utils import get_ffmpeg_path, image_to_jpeg_bytes
 
 import time
 
@@ -95,17 +95,7 @@ def convert_m4a_to_mp3_fast(source_audio: str, mp3_path: str, title: str = "", a
         if thumb_file and os.path.exists(thumb_file):
             try:
                 with open(thumb_file, 'rb') as img_f:
-                    img_bytes = img_f.read()
-
-                # Convert WebP/PNG -> Genuine JPEG for ID3 APIC compliance
-                from PySide6.QtGui import QImage
-                from PySide6.QtCore import QBuffer, QIODevice
-                qimg = QImage()
-                if qimg.loadFromData(img_bytes):
-                    buf = QBuffer()
-                    buf.open(QIODevice.WriteOnly)
-                    if qimg.save(buf, "JPEG"):
-                        img_bytes = buf.data().data()
+                    img_bytes = image_to_jpeg_bytes(img_f.read())
 
                 id3.add(APIC(
                     encoding=3,
