@@ -134,6 +134,99 @@ class DownloadSignals(QObject):
     finished = Signal(str, str, str, str)   # task_id, final_filepath, completion_msg, elapsed_str
     error = Signal(str, str)
 
+# Audio track selector: Strictly enforces original creator track and drops AI auto-dubs
+_ORIGINAL_BA = "(ba[format_note*=original]/ba[language=orig]/ba)"
+
+# Audio-only formats: name -> (format selector, extraction codec, embeds cover art)
+_AUDIO_FORMATS = {
+    "MP3 Audio": ('ba[format_note*=original]/ba[language=orig]/ba', None, False),
+    "M4A Audio": ('ba[format_note*=original][ext=m4a]/ba[ext=m4a]/ba[format_note*=original]/ba', 'm4a', True),
+    "WAV Audio": ('ba[format_note*=original]/ba[language=orig]/ba', 'wav', False),
+    "FLAC Audio": ('ba[format_note*=original]/ba[language=orig]/ba', 'flac', True),
+    "AAC Audio": ('ba[format_note*=original][ext=m4a]/ba[ext=m4a]/ba[format_note*=original]/ba', 'aac', False),
+    "OPUS Audio": ('ba[format_note*=original][ext=webm]/ba[ext=webm]/ba[format_note*=original]/ba', 'opus', True),
+}
+
+# Lossless codecs ignore the bitrate setting
+_LOSSLESS_CODECS = {'wav', 'flac'}
+
+# Thumbnail pipeline shared by every cover-art format
+_THUMBNAIL_POSTPROCESSORS = [
+    {'key': 'FFmpegThumbnailsConvertor', 'format': 'jpg'},
+    {'key': 'EmbedThumbnail', 'already_have_thumbnail': False},
+]
+
+# Video containers: name -> (merge container, merged audio codec, format sort priority)
+_VIDEO_FORMATS = {
+    "MP4 Video": ('mp4', 'aac', ['res', 'fps', 'quality', 'size', 'br']),
+    "WEBM Video": ('webm', 'libopus', ['res', 'fps', 'quality']),
+    "AVI Video": ('avi', 'libmp3lame', ['res', 'fps', 'quality']),
+    "MOV Video": ('mov', 'aac', ['res', 'fps', 'quality']),
+}
+_BEST_QUALITY_VIDEO = ('mkv', 'aac', ['res', 'fps', 'quality', 'size', 'br'])
+
+
+def build_video_format_string(max_h) -> str:
+    """Builds a strict highest-resolution format string with original-audio preference."""
+    if max_h:
+        return f"bv*[height<={max_h}]+{_ORIGINAL_BA}/b[height<={max_h}]/bv*+{_ORIGINAL_BA}/b"
+    return f"bv*+{_ORIGINAL_BA}/bv*+ba/b"
+
+
+def build_audio_postprocessor_args(has_boost: bool, vol_mult: float) -> dict:
+    """Postprocessor arguments applying the volume filter during audio extraction."""
+    if has_boost:
+        return {'extractaudio': ['-filter:a', f'volume={vol_mult}']}
+    return {}
+
+
+def build_merger_args(audio_codec: str, audio_bitrate_str: str, has_boost: bool, vol_mult: float) -> list:
+    """FFmpeg merger arguments keeping video untouched while normalizing the audio codec."""
+    merger_args = ['-c:v', 'copy', '-c:a', audio_codec, '-b:a', audio_bitrate_str]
+    if has_boost:
+        merger_args.extend(['-filter:a', f'volume={vol_mult}'])
+    return merger_args
+
+
+def build_format_options(fmt: str, video_format: str, audio_bitrate_num, audio_bitrate_str: str,
+                         has_boost: bool, vol_mult: float) -> dict:
+    """Declarative yt-dlp option overrides for the selected output format."""
+    if fmt in _AUDIO_FORMATS:
+        selector, codec, with_thumb = _AUDIO_FORMATS[fmt]
+        opts = {'writethumbnail': with_thumb, 'format': selector}
+
+        if codec is None:
+            # Raw best-audio stream; conversion is handled afterwards by converter.py
+            opts['postprocessors'] = []
+        else:
+            extract_pp = {'key': 'FFmpegExtractAudio', 'preferredcodec': codec}
+            if codec not in _LOSSLESS_CODECS:
+                extract_pp['preferredquality'] = audio_bitrate_num
+            opts['postprocessors'] = [
+                extract_pp,
+                {'key': 'FFmpegMetadata', 'add_metadata': True},
+                *( _THUMBNAIL_POSTPROCESSORS if with_thumb else [] )
+            ]
+        pp_args = build_audio_postprocessor_args(has_boost, vol_mult)
+        if pp_args:
+            opts['postprocessor_args'] = pp_args
+        return opts
+
+    container, audio_codec, format_sort = _VIDEO_FORMATS.get(fmt, _BEST_QUALITY_VIDEO)
+    opts = {
+        'format': video_format,
+        'format_sort': list(format_sort),
+        'format_sort_force': True,
+        'merge_output_format': container,
+        'postprocessors': [{'key': 'FFmpegMetadata', 'add_metadata': True}],
+    }
+    pp_args = {'merger': build_merger_args(audio_codec, audio_bitrate_str, has_boost, vol_mult)}
+    if fmt == "AVI Video" and has_boost:
+        pp_args['videoconvertor'] = ['-filter:a', f'volume={vol_mult}']
+    opts['postprocessor_args'] = pp_args
+    return opts
+
+
 class DownloadWorker(QRunnable):
     def __init__(self, task_id: str, url: str, options: dict, pre_data: dict = None):
         super().__init__()
@@ -353,132 +446,20 @@ class DownloadWorker(QRunnable):
         # Numeric parser for video resolution (height) & audio bitrate
         num_match = re.search(r'(\d+)', quality)
         parsed_num = num_match.group(1) if num_match else None
-        
+
         max_h = parsed_num if (parsed_num and "Audio" not in fmt and "Best" not in quality) else None
         audio_bitrate_num = parsed_num if (parsed_num and "Audio" in fmt) else "192"
         audio_bitrate_str = f"{audio_bitrate_num}k"
-        
-        # Audio track selector: Strictly enforces original creator track and drops AI auto-dubs
-        orig_ba = "(ba[format_note*=original]/ba[language=orig]/ba)"
 
-        # Build strict highest-resolution format string with original audio
-        if max_h:
-            video_format = f"bv*[height<={max_h}]+{orig_ba}/b[height<={max_h}]/bv*+{orig_ba}/b"
-        else:
-            video_format = f"bv*+{orig_ba}/bv*+ba/b"
+        video_format = build_video_format_string(max_h)
 
         if not ffmpeg_path:
             self.signals.error.emit(self.task_id, "Failed: FFmpeg binary missing in tools/. Please run install.bat.")
             return
-        else:
-            if fmt == "MP3 Audio":
-                ydl_opts['writethumbnail'] = False
-                ydl_opts['format'] = 'ba[format_note*=original]/ba[language=orig]/ba'
-                ydl_opts['postprocessors'] = []
-            elif fmt == "M4A Audio":
-                ydl_opts['writethumbnail'] = True
-                ydl_opts['format'] = 'ba[format_note*=original][ext=m4a]/ba[ext=m4a]/ba[format_note*=original]/ba'
-                ydl_opts['postprocessors'] = [
-                    {'key': 'FFmpegExtractAudio', 'preferredcodec': 'm4a', 'preferredquality': audio_bitrate_num},
-                    {'key': 'FFmpegMetadata', 'add_metadata': True},
-                    {'key': 'FFmpegThumbnailsConvertor', 'format': 'jpg'},
-                    {'key': 'EmbedThumbnail', 'already_have_thumbnail': False}
-                ]
-                if has_boost:
-                    ydl_opts['postprocessor_args'] = {'extractaudio': ['-filter:a', f'volume={vol_mult}']}
-            elif fmt == "WAV Audio":
-                ydl_opts['format'] = 'ba[format_note*=original]/ba[language=orig]/ba'
-                ydl_opts['postprocessors'] = [
-                    {'key': 'FFmpegExtractAudio', 'preferredcodec': 'wav'},
-                    {'key': 'FFmpegMetadata', 'add_metadata': True}
-                ]
-                if has_boost:
-                    ydl_opts['postprocessor_args'] = {'extractaudio': ['-filter:a', f'volume={vol_mult}']}
-            elif fmt == "FLAC Audio":
-                ydl_opts['writethumbnail'] = True
-                ydl_opts['format'] = 'ba[format_note*=original]/ba[language=orig]/ba'
-                ydl_opts['postprocessors'] = [
-                    {'key': 'FFmpegExtractAudio', 'preferredcodec': 'flac'},
-                    {'key': 'FFmpegMetadata', 'add_metadata': True},
-                    {'key': 'FFmpegThumbnailsConvertor', 'format': 'jpg'},
-                    {'key': 'EmbedThumbnail', 'already_have_thumbnail': False}
-                ]
-                if has_boost:
-                    ydl_opts['postprocessor_args'] = {'extractaudio': ['-filter:a', f'volume={vol_mult}']}
-            elif fmt == "AAC Audio":
-                ydl_opts['format'] = 'ba[format_note*=original][ext=m4a]/ba[ext=m4a]/ba[format_note*=original]/ba'
-                ydl_opts['postprocessors'] = [
-                    {'key': 'FFmpegExtractAudio', 'preferredcodec': 'aac', 'preferredquality': audio_bitrate_num},
-                    {'key': 'FFmpegMetadata', 'add_metadata': True}
-                ]
-                if has_boost:
-                    ydl_opts['postprocessor_args'] = {'extractaudio': ['-filter:a', f'volume={vol_mult}']}
-            elif fmt == "OPUS Audio":
-                ydl_opts['writethumbnail'] = True
-                ydl_opts['format'] = 'ba[format_note*=original][ext=webm]/ba[ext=webm]/ba[format_note*=original]/ba'
-                ydl_opts['postprocessors'] = [
-                    {'key': 'FFmpegExtractAudio', 'preferredcodec': 'opus', 'preferredquality': audio_bitrate_num},
-                    {'key': 'FFmpegMetadata', 'add_metadata': True},
-                    {'key': 'FFmpegThumbnailsConvertor', 'format': 'jpg'},
-                    {'key': 'EmbedThumbnail', 'already_have_thumbnail': False}
-                ]
-                if has_boost:
-                    ydl_opts['postprocessor_args'] = {'extractaudio': ['-filter:a', f'volume={vol_mult}']}
-            elif fmt == "MP4 Video":
-                ydl_opts['format'] = video_format
-                ydl_opts['format_sort'] = ['res', 'fps', 'quality', 'size', 'br']
-                ydl_opts['format_sort_force'] = True
-                ydl_opts['merge_output_format'] = 'mp4'
-                ydl_opts['postprocessors'] = [{'key': 'FFmpegMetadata', 'add_metadata': True}]
-                # Always transcode audio to universal AAC (never leave Opus in MP4)
-                merger_args = ['-c:v', 'copy', '-c:a', 'aac', '-b:a', audio_bitrate_str]
-                if has_boost:
-                    merger_args.extend(['-filter:a', f'volume={vol_mult}'])
-                ydl_opts['postprocessor_args'] = {'merger': merger_args}
-            elif fmt == "WEBM Video":
-                ydl_opts['format'] = video_format
-                ydl_opts['format_sort'] = ['res', 'fps', 'quality']
-                ydl_opts['format_sort_force'] = True
-                ydl_opts['merge_output_format'] = 'webm'
-                ydl_opts['postprocessors'] = [{'key': 'FFmpegMetadata', 'add_metadata': True}]
-                merger_args = ['-c:v', 'copy', '-c:a', 'libopus', '-b:a', audio_bitrate_str]
-                if has_boost:
-                    merger_args.extend(['-filter:a', f'volume={vol_mult}'])
-                ydl_opts['postprocessor_args'] = {'merger': merger_args}
-            elif fmt == "AVI Video":
-                ydl_opts['format'] = video_format
-                ydl_opts['format_sort'] = ['res', 'fps', 'quality']
-                ydl_opts['format_sort_force'] = True
-                ydl_opts['merge_output_format'] = 'avi'
-                ydl_opts['postprocessors'] = [{'key': 'FFmpegVideoConvertor', 'preferedformat': 'avi'}, {'key': 'FFmpegMetadata', 'add_metadata': True}]
-                # Always transcode audio to MP3 for universal AVI compatibility
-                merger_args = ['-c:v', 'copy', '-c:a', 'libmp3lame', '-b:a', audio_bitrate_str]
-                if has_boost:
-                    merger_args.extend(['-filter:a', f'volume={vol_mult}'])
-                ydl_opts['postprocessor_args'] = {
-                    'merger': merger_args,
-                    'videoconvertor': ['-filter:a', f'volume={vol_mult}'] if has_boost else []
-                }
-            elif fmt == "MOV Video":
-                ydl_opts['format'] = video_format
-                ydl_opts['format_sort'] = ['res', 'fps', 'quality']
-                ydl_opts['format_sort_force'] = True
-                ydl_opts['merge_output_format'] = 'mov'
-                ydl_opts['postprocessors'] = [{'key': 'FFmpegMetadata', 'add_metadata': True}]
-                merger_args = ['-c:v', 'copy', '-c:a', 'aac', '-b:a', audio_bitrate_str]
-                if has_boost:
-                    merger_args.extend(['-filter:a', f'volume={vol_mult}'])
-                ydl_opts['postprocessor_args'] = {'merger': merger_args}
-            else:  # Best Quality (MKV)
-                ydl_opts['format'] = video_format
-                ydl_opts['format_sort'] = ['res', 'fps', 'quality', 'size', 'br']
-                ydl_opts['format_sort_force'] = True
-                ydl_opts['merge_output_format'] = 'mkv'
-                ydl_opts['postprocessors'] = [{'key': 'FFmpegMetadata', 'add_metadata': True}]
-                merger_args = ['-c:v', 'copy', '-c:a', 'aac', '-b:a', audio_bitrate_str]
-                if has_boost:
-                    merger_args.extend(['-filter:a', f'volume={vol_mult}'])
-                ydl_opts['postprocessor_args'] = {'merger': merger_args}
+
+        ydl_opts.update(build_format_options(
+            fmt, video_format, audio_bitrate_num, audio_bitrate_str, has_boost, vol_mult
+        ))
 
         # --- Automatic Background Retry Loop ---
         max_auto_retries = 3
