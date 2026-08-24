@@ -41,6 +41,7 @@ class MainWindow(QMainWindow):
         
         self.active_workers = {}
         self.row_mapping = {}
+        self.desktop_toast = None  # Created lazily on first notification
         self.task_data = {}        # Tracks URL and configurations for manual retry loops
         self.completed_paths = {}  # Caches output filepaths for instant double-click playback
         self.active_metrics = {}    # Tracks realtime speed, bytes left, and ETA per worker
@@ -52,7 +53,6 @@ class MainWindow(QMainWindow):
         self.preview_timer.timeout.connect(self.fetch_title_previews)
 
         self.setup_ui()
-        self.desktop_toast = DesktopToast()
         self.apply_settings()
 
         # Connect the OS clipboard monitor signal
@@ -63,9 +63,15 @@ class MainWindow(QMainWindow):
         # Trigger silent update check on startup
         QTimer.singleShot(1000, lambda: self.check_for_updates(manual=False))
 
+    def _ensure_toast(self):
+        """Creates the floating toast widget on first notification instead of at startup."""
+        if self.desktop_toast is None:
+            self.desktop_toast = DesktopToast()
+        return self.desktop_toast
+
     def on_monitor_toggled(self, checked: bool):
         if checked:
-            self.desktop_toast.show_notification(
+            self._ensure_toast().show_notification(
                 "✓ Clipboard Monitor Active",
                 "Any copied YouTube links will automatically be added to your queue.",
                 2500
@@ -459,7 +465,7 @@ class MainWindow(QMainWindow):
                 
                 # Pop up directly on the Windows desktop (bottom-right above taskbar)
                 display_url = text if len(text) <= 48 else text[:45] + "..."
-                self.desktop_toast.show_notification(
+                self._ensure_toast().show_notification(
                     "✓ YouTube Link Added to Queue",
                     display_url,
                     2800
