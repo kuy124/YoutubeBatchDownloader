@@ -221,7 +221,7 @@ class UpdateWorker(QRunnable):
                 self.signals.error.emit(str(e))
 
 from .settings import Settings
-from .downloader import DownloadWorker, MetadataWorker, TitlePreviewWorker
+from .downloader import DownloadWorker, TitlePreviewWorker
 from .logger import log
 from .utils import get_icon_path
 
@@ -262,6 +262,9 @@ class MainWindow(QMainWindow):
         self.clipboard.dataChanged.connect(self.on_clipboard_changed)
         self.chk_monitor_clip.toggled.connect(self.on_monitor_toggled)
 
+        # Trigger silent update check on startup
+        QTimer.singleShot(1000, lambda: self.check_for_updates(manual=False))
+
     def on_monitor_toggled(self, checked: bool):
         if checked:
             self.desktop_toast.show_notification(
@@ -270,9 +273,6 @@ class MainWindow(QMainWindow):
                 2500
             )
         self.save_current_settings()
-
-        # Trigger silent update check on startup
-        QTimer.singleShot(1000, lambda: self.check_for_updates(manual=False))
 
     def check_for_updates(self, manual: bool = False):
         worker = UpdateWorker(APP_VERSION, manual=manual)
@@ -389,12 +389,6 @@ class MainWindow(QMainWindow):
         self.preview_input.horizontalScrollBar().rangeChanged.connect(sync_preview_h_scrollbar_range)
         self.preview_h_scrollbar.valueChanged.connect(self.preview_input.horizontalScrollBar().setValue)
         self.preview_input.horizontalScrollBar().valueChanged.connect(self.preview_h_scrollbar.setValue)
-
-        # --- Force Initial State Synchronization ---
-        # Prevents the scrollbars from starting with a default 0-99 range (tiny thumb)
-        sync_v_scrollbar_range(self.url_input.verticalScrollBar().minimum(), self.url_input.verticalScrollBar().maximum())
-        sync_url_h_scrollbar_range(self.url_input.horizontalScrollBar().minimum(), self.url_input.horizontalScrollBar().maximum())
-        sync_preview_h_scrollbar_range(self.preview_input.horizontalScrollBar().minimum(), self.preview_input.horizontalScrollBar().maximum())
 
         # --- Force Initial State Synchronization ---
         # Prevents the scrollbars from starting with a default 0-99 range (tiny thumb)
@@ -1023,32 +1017,6 @@ class MainWindow(QMainWindow):
         self.filter_table(self.search_input.text())
         self.update_status_summary()
         self.update_global_progress()
-
-    def on_metadata_extracted(self, task_id, pre_data):
-        """Called when a task's metadata pre-extraction phase completes."""
-        row = self.row_mapping.get(task_id)
-        if row is not None:
-            self.table.item(row, 0).setText(pre_data['title'])
-            self.table.item(row, 1).setText("Waiting in Queue...")
-            self.table.item(row, 1).setForeground(QBrush(QColor("#2e7d32")))
-            
-            ext_time = pre_data.get('extraction_time', 0.0)
-            self.table.item(row, 4).setText(f"{ext_time:.1f}s extract")
-
-        if task_id in self.task_data:
-            self.task_data[task_id]['pre_data'] = pre_data
-            url = self.task_data[task_id]['url']
-            options = self.task_data[task_id]['options']
-
-            # Step 2: Initialize and launch actual download worker
-            worker = DownloadWorker(task_id, url, options, pre_data)
-            worker.signals.progress.connect(self.update_progress)
-            worker.signals.finished.connect(self.task_finished)
-            worker.signals.error.connect(self.task_error)
-            
-            self.active_workers[task_id] = worker
-            self.threadpool.start(worker)
-            self.update_status_summary()
 
     def cancel_task(self, task_id):
         worker = self.active_workers.get(task_id)
