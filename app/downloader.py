@@ -240,6 +240,7 @@ class DownloadWorker(QRunnable):
         self.current_process = None
         self.final_filename = ""
         self.extraction_time = self.pre_data.get('extraction_time', 0.0)
+        self.extraction_start_time = None
         self.download_start_time = None
         self.queued_time = self.options.get('queued_time') or time.time()
         self.speed_history = []  # Rolling 15-sample window for smooth Mbps & steady ETA
@@ -292,8 +293,13 @@ class DownloadWorker(QRunnable):
 
         if d['status'] == 'downloading':
             now = time.time()
+            fresh_extraction_sample = False
             if self.download_start_time is None:
                 self.download_start_time = now
+                # The first download callback fires right after URL/stream extraction
+                # finished, so the elapsed wall time is the true extraction duration
+                self.extraction_time = max(0.0, now - (self.extraction_start_time or now))
+                fresh_extraction_sample = True
 
             self.final_filename = d.get('filename', '')
             percent = d.get('_percent_str', '0%').replace('\x1b[0;94m', '').replace('\x1b[0m', '').strip()
@@ -349,6 +355,8 @@ class DownloadWorker(QRunnable):
             }
             if title:
                 data['title'] = format_display_title(title, uploader)
+            if fresh_extraction_sample:
+                data['extraction_time'] = round(self.extraction_time, 3)
 
             self.signals.progress.emit(self.task_id, data)
 
@@ -389,7 +397,10 @@ class DownloadWorker(QRunnable):
 
     def run(self):
         log.info(f"Starting stream download task {self.task_id} for URL: {self.url}")
-        
+
+        # Timestamp anchor for measuring the real URL/stream extraction duration
+        self.extraction_start_time = time.time()
+
         # Pre-extracted metadata exists; immediately notify UI and proceed to stream download
         initial_title = self.pre_data.get('title', 'Preparing stream...')
         self.signals.progress.emit(self.task_id, {

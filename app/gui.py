@@ -167,6 +167,11 @@ class DesktopToast(QWidget):
 
 APP_VERSION = "v1.7.0"
 
+# Initial extraction overhead guess per task until real measurements arrive
+DEFAULT_EXTRACTION_SECONDS = 2.5
+# Rolling window size of measured extraction durations kept for averaging
+EXTRACTION_SAMPLE_WINDOW = 20
+
 def parse_version(ver_str: str) -> tuple:
     cleaned = re.sub(r'[^0-9.]', '', ver_str)
     return tuple(map(int, cleaned.split('.'))) if cleaned else (0,)
@@ -246,6 +251,7 @@ class MainWindow(QMainWindow):
         self.task_data = {}        # Tracks URL and configurations for manual retry loops
         self.completed_paths = {}  # Caches output filepaths for instant double-click playback
         self.active_metrics = {}    # Tracks realtime speed, bytes left, and ETA per worker
+        self.extraction_samples = []  # Rolling window of measured extraction durations
         self.batch_start_time = None
 
         self.preview_timer = QTimer()
@@ -911,9 +917,13 @@ class MainWindow(QMainWindow):
                 active_etas = [m.get('eta_seconds', 0) for m in self.active_metrics.values() if m.get('eta_seconds')]
                 download_time_sec = max(active_etas) if active_etas else 0
 
-            # Estimate API handshake + FFmpeg metadata extraction overhead (~2.5s per video)
-            EXTRACTION_OVERHEAD_PER_TASK = 2.5
-            total_extraction_time = (active + queued) * EXTRACTION_OVERHEAD_PER_TASK
+            # Measured API handshake + FFmpeg extraction overhead: rolling session
+            # average of real durations, falling back to the initial estimate first
+            if self.extraction_samples:
+                extraction_per_task = sum(self.extraction_samples) / len(self.extraction_samples)
+            else:
+                extraction_per_task = DEFAULT_EXTRACTION_SECONDS
+            total_extraction_time = (active + queued) * extraction_per_task
             
             total_estimated_seconds = int(download_time_sec + total_extraction_time)
             
@@ -1136,7 +1146,13 @@ class MainWindow(QMainWindow):
             self.table.item(row, 3).setText(data['speed'])
         if 'eta' in data:
             self.table.item(row, 4).setText(data['eta'])
-        
+
+        # Collect real extraction durations reported by workers for future ETA estimates
+        if 'extraction_time' in data:
+            self.extraction_samples.append(data['extraction_time'])
+            if len(self.extraction_samples) > EXTRACTION_SAMPLE_WINDOW:
+                self.extraction_samples.pop(0)
+
         if not data.get('is_postprocessing'):
             self.active_metrics[task_id] = {
                 'speed_bytes': data.get('speed_bytes', 0),
