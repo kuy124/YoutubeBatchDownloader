@@ -1,5 +1,7 @@
+import concurrent.futures
 import os
 import re
+import subprocess
 import time  # Used for cooling-off pause during automatic retries
 import urllib.request
 import yt_dlp
@@ -69,7 +71,6 @@ class TitlePreviewWorker(QRunnable):
             self.signals.fetched.emit([])
             return
 
-        import concurrent.futures
         # Fetch all link titles concurrently in parallel
         max_workers = min(12, len(self.raw_lines))
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -430,6 +431,191 @@ class DownloadWorker(QRunnable):
             log.debug(f"Thumbnail download notice: {ex}")
             return None
 
+    def _convert_to_mp3(self, ydl, info_dict: dict, boost_str: str, quality: str) -> bool:
+        """MP3 conversion pass. Returns False when run() must stop (cancelled or failed)."""
+        if self.is_cancelled:
+            self.cleanup_partial_files(self.final_filename)
+            self.signals.error.emit(self.task_id, "Cancelled.")
+            return False
+
+        downloaded_file = ydl.prepare_filename(info_dict)
+        base_path = os.path.splitext(downloaded_file)[0]
+        mp3_path = base_path + '.mp3'
+
+        # Locate downloaded audio stream file (.m4a, .webm, etc.)
+        source_file = downloaded_file
+        if not os.path.exists(source_file):
+            for ext in ['.m4a', '.webm', '.opus', '.mp4']:
+                if os.path.exists(base_path + ext):
+                    source_file = base_path + ext
+                    break
+
+        if not (os.path.exists(source_file) and source_file != mp3_path):
+            return True
+
+        self.signals.progress.emit(self.task_id, {
+            'status_text': 'Converting...',
+            'is_postprocessing': True
+        })
+
+        # Universal Thumbnail Fetcher for the ID3 cover art pass
+        self.download_thumbnail(info_dict, base_path)
+
+        if self.is_cancelled:
+            self.cleanup_partial_files(source_file)
+            self.signals.error.emit(self.task_id, "Cancelled.")
+            return False
+
+        title, artist = extract_media_tags(info_dict)
+
+        success = convert_m4a_to_mp3_fast(
+            source_file, mp3_path, title=title, artist=artist,
+            is_cancelled_cb=lambda: self.is_cancelled,
+            volume_boost=boost_str,
+            quality=quality
+        )
+
+        if self.is_cancelled:
+            self.cleanup_partial_files(mp3_path)
+            self.cleanup_partial_files(source_file)
+            self.signals.error.emit(self.task_id, "Cancelled.")
+            return False
+
+        if success and os.path.exists(mp3_path):
+            try:
+                os.remove(source_file)
+                log.info(f"Conversion finished: {mp3_path}")
+            except Exception as ex:
+                log.warning(f"Could not remove source file {source_file}: {ex}")
+        else:
+            if not self.is_cancelled:
+                self.signals.error.emit(self.task_id, "Failed: Audio conversion failed.")
+            else:
+                self.cleanup_partial_files(mp3_path)
+                self.cleanup_partial_files(source_file)
+                self.signals.error.emit(self.task_id, "Cancelled.")
+            return False
+
+        return True
+
+    def _remux_aac(self, ffmpeg_path: str, ydl, info_dict: dict,
+                   audio_bitrate_str: str, boost_filter) -> bool:
+        """Remuxes the M4A container to raw .aac with ID3v2 metadata. Returns False to abort run()."""
+        if self.is_cancelled:
+            self.cleanup_partial_files(self.final_filename)
+            self.signals.error.emit(self.task_id, "Cancelled.")
+            return False
+
+        downloaded_file = ydl.prepare_filename(info_dict)
+        base_path = os.path.splitext(downloaded_file)[0]
+        aac_path = base_path + '.aac'
+        if not (os.path.exists(downloaded_file) and downloaded_file != aac_path):
+            return True
+
+        creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000) if os.name == 'nt' else 0
+        aac_cmd = [
+            ffmpeg_path, '-y', '-threads', '0',
+            '-i', downloaded_file,
+            '-vn'
+        ]
+        aac_cmd.extend(['-c:a', 'aac', '-b:a', audio_bitrate_str])
+        if boost_filter:
+            aac_cmd.extend(['-filter:a', boost_filter])
+        aac_cmd.extend([
+            '-map_metadata', '0',
+            '-write_id3v2', '1',
+            aac_path
+        ])
+        proc = subprocess.Popen(aac_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creationflags)
+
+        self.current_process = proc
+        while proc.poll() is None:
+            if self.is_cancelled:
+                proc.kill()
+                proc.wait()
+                self.cleanup_partial_files(aac_path)
+                self.cleanup_partial_files(downloaded_file)
+                self.signals.error.emit(self.task_id, "Cancelled.")
+                return False
+            time.sleep(0.05)
+        self.current_process = None
+
+        if self.is_cancelled:
+            self.cleanup_partial_files(aac_path)
+            self.cleanup_partial_files(downloaded_file)
+            self.signals.error.emit(self.task_id, "Cancelled.")
+            return False
+
+        if os.path.exists(aac_path):
+            try:
+                os.remove(downloaded_file)
+            except Exception:
+                pass
+        return True
+
+    def _embed_wav_art(self, ydl, info_dict: dict) -> bool:
+        """Embeds title/artist/cover art into the WAV ID3 chunk via mutagen; yt-dlp cannot
+        attach thumbnails to .wav. Returns False to abort run()."""
+        if self.is_cancelled:
+            self.cleanup_partial_files(self.final_filename)
+            self.signals.error.emit(self.task_id, "Cancelled.")
+            return False
+
+        wav_file = ydl.prepare_filename(info_dict)
+        if wav_file and not wav_file.endswith('.wav'):
+            wav_file = os.path.splitext(wav_file)[0] + '.wav'
+
+        if not os.path.exists(wav_file):
+            return True
+
+        self.signals.progress.emit(self.task_id, {
+            'status_text': 'Embedding Album Art...',
+            'is_postprocessing': True
+        })
+
+        base_path = os.path.splitext(wav_file)[0]
+        thumb_path = self.download_thumbnail(info_dict, base_path)
+
+        if self.is_cancelled:
+            self.cleanup_partial_files(thumb_path)
+            self.cleanup_partial_files(self.final_filename)
+            self.signals.error.emit(self.task_id, "Cancelled.")
+            return False
+
+        title, artist = extract_media_tags(info_dict)
+        embed_wav_metadata(wav_file, thumb_path=thumb_path,
+                           title=title, artist=artist)
+
+        if thumb_path and os.path.exists(thumb_path):
+            try:
+                os.remove(thumb_path)
+            except Exception:
+                pass
+        return True
+
+    def _resolve_final_path(self, ydl, info_dict: dict, fmt: str) -> str:
+        """Calculates the true destination file path for instant GUI playback."""
+        final_path = ""
+        if info_dict:
+            prepared_path = ydl.prepare_filename(info_dict)
+            ext_map = {
+                "MP3 Audio": ".mp3", "M4A Audio": ".m4a", "WAV Audio": ".wav",
+                "FLAC Audio": ".flac", "AAC Audio": ".aac", "OPUS Audio": ".opus",
+                "MP4 Video": ".mp4", "WEBM Video": ".webm", "AVI Video": ".avi", "MOV Video": ".mov"
+            }
+            if fmt in ext_map:
+                final_path = os.path.splitext(prepared_path)[0] + ext_map[fmt]
+            else:
+                final_path = prepared_path
+
+        if not final_path or not os.path.exists(final_path):
+            final_path = self.final_filename
+            if final_path and fmt == "MP3 Audio" and not final_path.endswith('.mp3'):
+                final_path = os.path.splitext(final_path)[0] + '.mp3'
+        if not final_path:
+            final_path = self.options['download_path']
+        return final_path
+
     def run(self):
         log.info(f"Starting stream download task {self.task_id} for URL: {self.url}")
 
@@ -517,181 +703,24 @@ class DownloadWorker(QRunnable):
                 # Single-pass download execution
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info_dict = ydl.extract_info(self.url, download=True)
-                
-                # MP3 CONVERSION PASS
+
+                # Format-specific post-processing passes; each returns False to abort
                 if fmt == "MP3 Audio" and info_dict:
-                    if self.is_cancelled:
-                        self.cleanup_partial_files(self.final_filename)
-                        self.signals.error.emit(self.task_id, "Cancelled.")
+                    if not self._convert_to_mp3(ydl, info_dict, boost_str, quality):
                         return
 
-                    downloaded_file = ydl.prepare_filename(info_dict)
-                    base_path = os.path.splitext(downloaded_file)[0]
-                    mp3_path = base_path + '.mp3'
-                    
-                    # Locate downloaded audio stream file (.m4a, .webm, etc.)
-                    source_file = downloaded_file
-                    if not os.path.exists(source_file):
-                        for ext in ['.m4a', '.webm', '.opus', '.mp4']:
-                            if os.path.exists(base_path + ext):
-                                source_file = base_path + ext
-                                break
-                    
-                    if os.path.exists(source_file) and source_file != mp3_path:
-                        self.signals.progress.emit(self.task_id, {
-                            'status_text': 'Converting...',
-                            'is_postprocessing': True
-                        })
-
-                        # Universal Thumbnail Fetcher for the ID3 cover art pass
-                        self.download_thumbnail(info_dict, base_path)
-
-                        if self.is_cancelled:
-                            self.cleanup_partial_files(source_file)
-                            self.signals.error.emit(self.task_id, "Cancelled.")
-                            return
-
-                        title, artist = extract_media_tags(info_dict)
-
-                        success = convert_m4a_to_mp3_fast(
-                            source_file, mp3_path, title=title, artist=artist,
-                            is_cancelled_cb=lambda: self.is_cancelled,
-                            volume_boost=boost_str,
-                            quality=quality
-                        )
-
-                        if self.is_cancelled:
-                            self.cleanup_partial_files(mp3_path)
-                            self.cleanup_partial_files(source_file)
-                            self.signals.error.emit(self.task_id, "Cancelled.")
-                            return
-
-                        if success and os.path.exists(mp3_path):
-                            try:
-                                os.remove(source_file)
-                                log.info(f"Conversion finished: {mp3_path}")
-                            except Exception as ex:
-                                log.warning(f"Could not remove source file {source_file}: {ex}")
-                        else:
-                            if not self.is_cancelled:
-                                self.signals.error.emit(self.task_id, "Failed: Audio conversion failed.")
-                            else:
-                                self.cleanup_partial_files(mp3_path)
-                                self.cleanup_partial_files(source_file)
-                                self.signals.error.emit(self.task_id, "Cancelled.")
-                            return
-
-                # Remux M4A container to raw .aac with full ID3v2 metadata preservation
                 if fmt == "AAC Audio" and ffmpeg_path and info_dict:
-                    if self.is_cancelled:
-                        self.cleanup_partial_files(self.final_filename)
-                        self.signals.error.emit(self.task_id, "Cancelled.")
+                    if not self._remux_aac(ffmpeg_path, ydl, info_dict,
+                                           audio_bitrate_str, boost_filter):
                         return
 
-                    downloaded_file = ydl.prepare_filename(info_dict)
-                    base_path = os.path.splitext(downloaded_file)[0]
-                    aac_path = base_path + '.aac'
-                    if os.path.exists(downloaded_file) and downloaded_file != aac_path:
-                        import subprocess
-                        creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000) if os.name == 'nt' else 0
-                        aac_cmd = [
-                            ffmpeg_path, '-y', '-threads', '0',
-                            '-i', downloaded_file,
-                            '-vn'
-                        ]
-                        aac_cmd.extend(['-c:a', 'aac', '-b:a', audio_bitrate_str])
-                        if boost_filter:
-                            aac_cmd.extend(['-filter:a', boost_filter])
-                        aac_cmd.extend([
-                            '-map_metadata', '0',
-                            '-write_id3v2', '1',
-                            aac_path
-                        ])
-                        proc = subprocess.Popen(aac_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creationflags)
-                        
-                        self.current_process = proc
-                        while proc.poll() is None:
-                            if self.is_cancelled:
-                                proc.kill()
-                                proc.wait()
-                                self.cleanup_partial_files(aac_path)
-                                self.cleanup_partial_files(downloaded_file)
-                                self.signals.error.emit(self.task_id, "Cancelled.")
-                                return
-                            time.sleep(0.05)
-                        self.current_process = None
-
-                        if self.is_cancelled:
-                            self.cleanup_partial_files(aac_path)
-                            self.cleanup_partial_files(downloaded_file)
-                            self.signals.error.emit(self.task_id, "Cancelled.")
-                            return
-
-                        if os.path.exists(aac_path):
-                            try:
-                                os.remove(downloaded_file)
-                            except Exception:
-                                pass
-
-                # Embed title/artist/cover art into the WAV ID3 chunk; yt-dlp cannot
-                # attach thumbnails to .wav, so this is done manually via mutagen
                 if fmt == "WAV Audio" and info_dict:
-                    if self.is_cancelled:
-                        self.cleanup_partial_files(self.final_filename)
-                        self.signals.error.emit(self.task_id, "Cancelled.")
+                    if not self._embed_wav_art(ydl, info_dict):
                         return
 
-                    wav_file = ydl.prepare_filename(info_dict)
-                    if wav_file and not wav_file.endswith('.wav'):
-                        wav_file = os.path.splitext(wav_file)[0] + '.wav'
-
-                    if os.path.exists(wav_file):
-                        self.signals.progress.emit(self.task_id, {
-                            'status_text': 'Embedding Album Art...',
-                            'is_postprocessing': True
-                        })
-
-                        base_path = os.path.splitext(wav_file)[0]
-                        thumb_path = self.download_thumbnail(info_dict, base_path)
-
-                        if self.is_cancelled:
-                            self.cleanup_partial_files(thumb_path)
-                            self.cleanup_partial_files(self.final_filename)
-                            self.signals.error.emit(self.task_id, "Cancelled.")
-                            return
-
-                        title, artist = extract_media_tags(info_dict)
-                        embed_wav_metadata(wav_file, thumb_path=thumb_path,
-                                           title=title, artist=artist)
-
-                        if thumb_path and os.path.exists(thumb_path):
-                            try:
-                                os.remove(thumb_path)
-                            except Exception:
-                                pass
-
-                # Calculate true destination file path for instant GUI playback
                 if not self.is_cancelled:
-                    final_path = ""
-                    if info_dict:
-                        prepared_path = ydl.prepare_filename(info_dict)
-                        ext_map = {
-                            "MP3 Audio": ".mp3", "M4A Audio": ".m4a", "WAV Audio": ".wav",
-                            "FLAC Audio": ".flac", "AAC Audio": ".aac", "OPUS Audio": ".opus",
-                            "MP4 Video": ".mp4", "WEBM Video": ".webm", "AVI Video": ".avi", "MOV Video": ".mov"
-                        }
-                        if fmt in ext_map:
-                            final_path = os.path.splitext(prepared_path)[0] + ext_map[fmt]
-                        else:
-                            final_path = prepared_path
-                            
-                    if not final_path or not os.path.exists(final_path):
-                        final_path = self.final_filename
-                        if final_path and fmt == "MP3 Audio" and not final_path.endswith('.mp3'):
-                            final_path = os.path.splitext(final_path)[0] + '.mp3'
-                    if not final_path:
-                        final_path = self.options['download_path']
-                        
+                    final_path = self._resolve_final_path(ydl, info_dict, fmt)
+
                     elapsed_sec = int(time.time() - self.queued_time)
                     elapsed_str = format_elapsed_words(elapsed_sec)
                     
