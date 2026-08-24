@@ -98,6 +98,20 @@ class MainWindow(QMainWindow):
     def on_update_error(self, err_msg: str):
         QMessageBox.warning(self, "Update Check Failed", f"Could not check for updates:\n{err_msg}")
 
+    @staticmethod
+    def _mirror_scrollbar_range(source, mirror):
+        """Mirrors a scrollbar's range and page step onto a standalone scrollbar."""
+        def sync_range(min_val, max_val):
+            mirror.setRange(min_val, max_val)
+            mirror.setPageStep(source.pageStep())
+        source.rangeChanged.connect(sync_range)
+
+    def _bind_standalone_scrollbar(self, editor_sb, standalone_sb):
+        """Two-way binding between an editor scrollbar and its dedicated standalone bar."""
+        self._mirror_scrollbar_range(editor_sb, standalone_sb)
+        standalone_sb.valueChanged.connect(editor_sb.setValue)
+        editor_sb.valueChanged.connect(standalone_sb.setValue)
+
     def setup_ui(self):
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
@@ -159,40 +173,31 @@ class MainWindow(QMainWindow):
         self.url_input.document().setDocumentMargin(4)
         self.preview_input.document().setDocumentMargin(4)
 
-        # --- Synchronize Shared Vertical Scrollbar ---
-        def sync_v_scrollbar_range(min_val, max_val):
-            self.sync_v_scrollbar.setRange(min_val, max_val)
-            self.sync_v_scrollbar.setPageStep(self.url_input.verticalScrollBar().pageStep())
-            
-        self.url_input.verticalScrollBar().rangeChanged.connect(sync_v_scrollbar_range)
-        self.sync_v_scrollbar.valueChanged.connect(self.url_input.verticalScrollBar().setValue)
-        self.sync_v_scrollbar.valueChanged.connect(self.preview_input.verticalScrollBar().setValue)
-        self.url_input.verticalScrollBar().valueChanged.connect(self.sync_v_scrollbar.setValue)
-        self.preview_input.verticalScrollBar().valueChanged.connect(self.sync_v_scrollbar.setValue)
-        
-        # --- Synchronize URL Horizontal Scrollbar ---
-        def sync_url_h_scrollbar_range(min_val, max_val):
-            self.url_h_scrollbar.setRange(min_val, max_val)
-            self.url_h_scrollbar.setPageStep(self.url_input.horizontalScrollBar().pageStep())
-            
-        self.url_input.horizontalScrollBar().rangeChanged.connect(sync_url_h_scrollbar_range)
-        self.url_h_scrollbar.valueChanged.connect(self.url_input.horizontalScrollBar().setValue)
-        self.url_input.horizontalScrollBar().valueChanged.connect(self.url_h_scrollbar.setValue)
-        
-        # --- Synchronize Preview Horizontal Scrollbar ---
-        def sync_preview_h_scrollbar_range(min_val, max_val):
-            self.preview_h_scrollbar.setRange(min_val, max_val)
-            self.preview_h_scrollbar.setPageStep(self.preview_input.horizontalScrollBar().pageStep())
-            
-        self.preview_input.horizontalScrollBar().rangeChanged.connect(sync_preview_h_scrollbar_range)
-        self.preview_h_scrollbar.valueChanged.connect(self.preview_input.horizontalScrollBar().setValue)
-        self.preview_input.horizontalScrollBar().valueChanged.connect(self.preview_h_scrollbar.setValue)
+        # --- Synchronize Scrollbars ---
+        url_v_sb = self.url_input.verticalScrollBar()
+        preview_v_sb = self.preview_input.verticalScrollBar()
+        url_h_sb = self.url_input.horizontalScrollBar()
+        preview_h_sb = self.preview_input.horizontalScrollBar()
+
+        # Shared vertical bar acts as the hub driving both text editors
+        self._mirror_scrollbar_range(url_v_sb, self.sync_v_scrollbar)
+        self.sync_v_scrollbar.valueChanged.connect(url_v_sb.setValue)
+        self.sync_v_scrollbar.valueChanged.connect(preview_v_sb.setValue)
+        url_v_sb.valueChanged.connect(self.sync_v_scrollbar.setValue)
+        preview_v_sb.valueChanged.connect(self.sync_v_scrollbar.setValue)
+
+        self._bind_standalone_scrollbar(url_h_sb, self.url_h_scrollbar)
+        self._bind_standalone_scrollbar(preview_h_sb, self.preview_h_scrollbar)
 
         # --- Force Initial State Synchronization ---
         # Prevents the scrollbars from starting with a default 0-99 range (tiny thumb)
-        sync_v_scrollbar_range(self.url_input.verticalScrollBar().minimum(), self.url_input.verticalScrollBar().maximum())
-        sync_url_h_scrollbar_range(self.url_input.horizontalScrollBar().minimum(), self.url_input.horizontalScrollBar().maximum())
-        sync_preview_h_scrollbar_range(self.preview_input.horizontalScrollBar().minimum(), self.preview_input.horizontalScrollBar().maximum())
+        for source, mirror in [
+            (url_v_sb, self.sync_v_scrollbar),
+            (url_h_sb, self.url_h_scrollbar),
+            (preview_h_sb, self.preview_h_scrollbar),
+        ]:
+            mirror.setRange(source.minimum(), source.maximum())
+            mirror.setPageStep(source.pageStep())
 
         url_btn_layout = QHBoxLayout()
         btn_paste = QPushButton("Paste Clipboard")
