@@ -19,7 +19,7 @@ from .settings import Settings
 from .downloader import DownloadWorker, TitlePreviewWorker
 from .logger import log
 from .updater import APP_VERSION, UpdateWorker
-from .utils import get_icon_path
+from .utils import format_elapsed_words, format_hms, get_icon_path
 from .widgets import DesktopToast
 
 class MainWindow(QMainWindow):
@@ -462,11 +462,7 @@ class MainWindow(QMainWindow):
 
     def on_table_double_clicked(self, row, column):
         """Allows double-clicking any complete row to play the downloaded file."""
-        task_id = None
-        for tid, r_idx in list(self.row_mapping.items()):
-            if r_idx == row:
-                task_id = tid
-                break
+        task_id = self._row_to_task_id(row)
         
         if task_id:
             file_path = self.completed_paths.get(task_id)
@@ -502,11 +498,7 @@ class MainWindow(QMainWindow):
         """Filters queue table rows dynamically matching title or URL."""
         query = query.strip().lower()
         for row in range(self.table.rowCount()):
-            task_id = None
-            for tid, r_idx in self.row_mapping.items():
-                if r_idx == row:
-                    task_id = tid
-                    break
+            task_id = self._row_to_task_id(row)
             
             title = self.table.item(row, 0).text() if self.table.item(row, 0) else ""
             url = self.task_data.get(task_id, {}).get('url', '') if task_id else ""
@@ -721,12 +713,7 @@ class MainWindow(QMainWindow):
             total_estimated_seconds = int(download_time_sec + total_extraction_time)
             
             if total_estimated_seconds > 0:
-                mins, secs = divmod(total_estimated_seconds, 60)
-                hours, mins = divmod(mins, 60)
-                if hours > 0:
-                    eta_str = f"{hours:02d}:{mins:02d}:{secs:02d}"
-                else:
-                    eta_str = f"{mins:02d}:{secs:02d}"
+                eta_str = format_hms(total_estimated_seconds)
 
         self.statusBar.showMessage(f"Total Tasks: {total}  |  Active: {active}  |  Completed: {completed}  |  Failed: {failed}  |  Total ETA: {eta_str}")
 
@@ -766,6 +753,29 @@ class MainWindow(QMainWindow):
             cached_title = previews[idx]
             self.add_task(url, options, title=cached_title)
 
+    def _make_cancel_button(self, task_id: str) -> QPushButton:
+        """Builds a Cancel button wired to the given task id."""
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.clicked.connect(lambda _, tid=task_id: self.cancel_task(tid))
+        return btn_cancel
+
+    def _launch_download_worker(self, task_id: str, url: str, options: dict, pre_data: dict = None):
+        """Builds, wires and queues a DownloadWorker for the given task."""
+        worker = DownloadWorker(task_id, url, options, pre_data)
+        worker.signals.progress.connect(self.update_progress)
+        worker.signals.finished.connect(self.task_finished)
+        worker.signals.error.connect(self.task_error)
+
+        self.active_workers[task_id] = worker
+        self.threadpool.start(worker)
+
+    def _row_to_task_id(self, row: int):
+        """Reverse lookup returning the task id mapped to a table row, or None."""
+        for tid, r_idx in self.row_mapping.items():
+            if r_idx == row:
+                return tid
+        return None
+
     def add_task(self, url, options, title=None):
         task_id = str(uuid.uuid4())
         
@@ -791,8 +801,7 @@ class MainWindow(QMainWindow):
         progress_bar = QProgressBar()
         progress_bar.setValue(0)
         
-        btn_cancel = QPushButton("Cancel")
-        btn_cancel.clicked.connect(lambda _, tid=task_id: self.cancel_task(tid))
+        btn_cancel = self._make_cancel_button(task_id)
         
         self.table.setItem(row_idx, 0, title_item)
         self.table.setItem(row_idx, 1, status_item)
@@ -808,13 +817,7 @@ class MainWindow(QMainWindow):
         pre_data = {'title': pre_title}
         self.task_data[task_id]['pre_data'] = pre_data
 
-        worker = DownloadWorker(task_id, url, options, pre_data)
-        worker.signals.progress.connect(self.update_progress)
-        worker.signals.finished.connect(self.task_finished)
-        worker.signals.error.connect(self.task_error)
-        
-        self.active_workers[task_id] = worker
-        self.threadpool.start(worker)
+        self._launch_download_worker(task_id, url, options, pre_data)
 
         self.filter_table(self.search_input.text())
         self.update_status_summary()
@@ -846,18 +849,10 @@ class MainWindow(QMainWindow):
         self.table.item(row, 4).setText("-")
         
         # Recreate and assign the Cancel button for the active process
-        btn_cancel = QPushButton("Cancel")
-        btn_cancel.clicked.connect(lambda _, tid=task_id: self.cancel_task(tid))
-        self.table.setCellWidget(row, 5, btn_cancel)
+        self.table.setCellWidget(row, 5, self._make_cancel_button(task_id))
         
         # Build and queue the new worker instance
-        worker = DownloadWorker(task_id, url, options)
-        worker.signals.progress.connect(self.update_progress)
-        worker.signals.finished.connect(self.task_finished)
-        worker.signals.error.connect(self.task_error)
-        
-        self.active_workers[task_id] = worker
-        self.threadpool.start(worker)
+        self._launch_download_worker(task_id, url, options)
         self.update_status_summary()
         self.update_global_progress()
 
@@ -997,12 +992,7 @@ class MainWindow(QMainWindow):
         if len(self.active_workers) == 0:
             if self.batch_start_time:
                 batch_sec = int(time.time() - self.batch_start_time)
-                b_mins, b_secs = divmod(batch_sec, 60)
-                if b_mins > 0:
-                    b_str = f"{b_mins} minute{'s' if b_mins != 1 else ''} and {b_secs} second{'s' if b_secs != 1 else ''}"
-                else:
-                    b_str = f"{b_secs} second{'s' if b_secs != 1 else ''}"
-                completion_msg = f"Your download completed in {b_str}"
+                completion_msg = f"Your download completed in {format_elapsed_words(batch_sec)}"
             
             self.play_finished_sound()
             
