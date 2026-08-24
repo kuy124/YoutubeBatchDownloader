@@ -1,12 +1,11 @@
 import os
 import re
+import time
 import subprocess
 from mutagen.mp3 import MP3
 from mutagen.id3 import ID3, TIT2, TPE1, APIC, ID3NoHeaderError
 from .logger import log
 from .utils import get_ffmpeg_path, image_to_jpeg_bytes
-
-import time
 
 def convert_m4a_to_mp3_fast(source_audio: str, mp3_path: str, title: str = "", artist: str = "", is_cancelled_cb=None, volume_boost: str = "100% (Original)", quality: str = "192 kbps") -> bool:
     """

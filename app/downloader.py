@@ -1,6 +1,7 @@
 import os
 import re
 import time  # Used for cooling-off pause during automatic retries
+import urllib.request
 import yt_dlp
 from PySide6.QtCore import QRunnable, QObject, Signal
 from .utils import (
@@ -506,8 +507,6 @@ class DownloadWorker(QRunnable):
 
                         if thumb_url and not self.is_cancelled:
                             try:
-                                import urllib.request
-
                                 thumb_path = base_path + '.jpg'
                                 req = urllib.request.Request(thumb_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
                                 with urllib.request.urlopen(req, timeout=2, context=insecure_ssl_context()) as resp:

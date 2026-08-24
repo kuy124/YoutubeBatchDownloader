@@ -1,6 +1,5 @@
 import os
 import uuid
-import json
 import urllib.request
 import re
 import time

@@ -5,6 +5,7 @@ import shutil
 import ssl
 import urllib.parse
 import urllib.request
+from urllib.parse import parse_qs, urlparse
 
 
 def get_root_dir() -> str:
@@ -52,19 +53,9 @@ def get_icon_path() -> str:
     return ""
 
 
-def format_speed(speed_bytes) -> str:
-    if speed_bytes is None:
-        return "0 KB/s"
-    speed = speed_bytes / 1024
-    if speed > 1024:
-        return f"{speed / 1024:.2f} MB/s"
-    return f"{speed:.2f} KB/s"
-
-
 def clean_youtube_url(url: str) -> str:
     """Strips mix/playlist parameters to ensure single-video metadata is fetched."""
     if "youtube.com/watch" in url and "v=" in url:
-        from urllib.parse import parse_qs, urlparse
         parsed = urlparse(url)
         qs = parse_qs(parsed.query)
         if 'v' in qs:
