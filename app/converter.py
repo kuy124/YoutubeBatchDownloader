@@ -2,8 +2,8 @@ import os
 import re
 import time
 import subprocess
-from mutagen.mp3 import MP3
 from mutagen.id3 import ID3, TIT2, TPE1, APIC, ID3NoHeaderError
+from mutagen.wave import WAVE
 from .logger import log
 from .utils import build_audio_boost_filter, get_ffmpeg_path, image_to_jpeg_bytes
 
@@ -14,9 +14,6 @@ def embed_wav_metadata(wav_path: str, thumb_path: str = None, title: str = "", a
     so media players and Explorer display the artwork. yt-dlp cannot do this natively.
     """
     try:
-        from mutagen.id3 import TIT2, TPE1, APIC
-        from mutagen.wave import WAVE
-
         audio = WAVE(wav_path)
         if audio.tags is None:
             audio.add_tags()
