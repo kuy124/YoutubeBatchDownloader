@@ -4,6 +4,7 @@ import re
 import subprocess
 import time  # Used for cooling-off pause during automatic retries
 import urllib.request
+import yt_dlp
 from PySide6.QtCore import QRunnable, QObject, Signal
 from .utils import (
     build_audio_boost_filter,
@@ -45,8 +46,6 @@ class TitlePreviewWorker(QRunnable):
             return oembed_title
 
         # FAST PATH 2: Fallback to lightweight yt-dlp
-        import yt_dlp  # Deferred: keeps app startup light until first use
-
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
@@ -106,8 +105,6 @@ class MetadataWorker(QRunnable):
             return
 
         # FAST PATH 2: Fallback to yt-dlp
-        import yt_dlp  # Deferred: keeps app startup light until first use
-
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
@@ -704,7 +701,6 @@ class DownloadWorker(QRunnable):
                 
             try:
                 # Single-pass download execution
-                import yt_dlp  # Deferred: keeps app startup light until first use
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info_dict = ydl.extract_info(self.url, download=True)
 
