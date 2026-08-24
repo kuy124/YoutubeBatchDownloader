@@ -9,10 +9,13 @@ from .utils import (
     clean_youtube_url,
     fetch_oembed_title,
     format_display_title,
+    format_elapsed_words,
+    format_hms,
     get_ffmpeg_path,
     image_to_jpeg_bytes,
     insecure_ssl_context,
     is_youtube_url,
+    resolve_uploader,
 )
 from .logger import log
 from .converter import convert_m4a_to_mp3_fast, embed_wav_metadata
@@ -57,8 +60,7 @@ class TitlePreviewWorker(QRunnable):
                 if not info:
                     return "Failed to load title"
                 title = info.get('title', 'Unknown Title')
-                uploader = info.get('artist') or info.get('uploader') or info.get('creator') or info.get('channel')
-                return format_display_title(title, uploader)
+                return format_display_title(title, resolve_uploader(info))
         except Exception:
             return "Failed to load title"
 
@@ -119,10 +121,9 @@ class MetadataWorker(QRunnable):
                 extraction_time = time.time() - t0
                 if info:
                     title = info.get('title', 'Unknown Title')
-                    uploader = info.get('artist') or info.get('uploader') or info.get('creator') or info.get('channel')
                     file_size = info.get('filesize') or info.get('filesize_approx') or 0
                     self.signals.finished.emit(self.task_id, {
-                        'title': format_display_title(title, uploader),
+                        'title': format_display_title(title, resolve_uploader(info)),
                         'file_size': file_size,
                         'extraction_time': extraction_time
                     })
@@ -239,8 +240,7 @@ def build_format_options(fmt: str, video_format: str, audio_bitrate_num, audio_b
 def extract_media_tags(info_dict: dict) -> tuple:
     """Returns (title, artist), preferring dedicated music artist metadata fields."""
     title = info_dict.get('title', '') or ''
-    artist = info_dict.get('artist') or info_dict.get('uploader') or info_dict.get('channel') or ''
-    return title, artist
+    return title, resolve_uploader(info_dict)
 
 
 class DownloadWorker(QRunnable):
@@ -339,9 +339,7 @@ class DownloadWorker(QRunnable):
             if smooth_speed > 0 and remaining_b > 0:
                 raw_eta = remaining_b / smooth_speed
                 total_task_eta_sec = int(raw_eta + self.extraction_time)
-                mins, secs = divmod(total_task_eta_sec, 60)
-                hours, mins = divmod(mins, 60)
-                formatted_eta = f"{hours:02d}:{mins:02d}:{secs:02d}" if hours > 0 else f"{mins:02d}:{secs:02d}"
+                formatted_eta = format_hms(total_task_eta_sec)
             else:
                 formatted_eta = d.get('_eta_str', 'Unknown').replace('\x1b[0;33m', '').replace('\x1b[0m', '').strip()
                 total_task_eta_sec = None
@@ -356,7 +354,7 @@ class DownloadWorker(QRunnable):
 
             info_dict = d.get('info_dict', {}) or {}
             title = info_dict.get('title')
-            uploader = info_dict.get('artist') or info_dict.get('uploader') or info_dict.get('creator') or info_dict.get('channel')
+            uploader = resolve_uploader(info_dict)
 
             data = {
                 'percent': percent,
@@ -695,11 +693,7 @@ class DownloadWorker(QRunnable):
                         final_path = self.options['download_path']
                         
                     elapsed_sec = int(time.time() - self.queued_time)
-                    mins, secs = divmod(elapsed_sec, 60)
-                    if mins > 0:
-                        elapsed_str = f"{mins} minute{'s' if mins != 1 else ''} and {secs} second{'s' if secs != 1 else ''}"
-                    else:
-                        elapsed_str = f"{secs} second{'s' if secs != 1 else ''}"
+                    elapsed_str = format_elapsed_words(elapsed_sec)
                     
                     completion_msg = f"Your download completed in {elapsed_str}"
                     self.signals.finished.emit(self.task_id, final_path, completion_msg, elapsed_str)
