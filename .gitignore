@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+
+# Build artifacts
+build/
+dist/
+*.spec
+
+# Runtime artifacts
+logs/
+downloads/
+
+# User-local config and binaries
+settings.json
+tools/
