@@ -382,20 +382,16 @@ class MainWindow(QMainWindow):
         sys_footer = QWidget()
         sys_footer_lay = QHBoxLayout(sys_footer)
         sys_footer_lay.setContentsMargins(0, 0, 0, 0)
-        btn_check_update = QPushButton("Check for Updates")
-        btn_check_update.clicked.connect(lambda: self.check_for_updates(manual=True))
         btn_close_system = QPushButton("Close")
         btn_close_system.clicked.connect(self.system_dialog.close)
         sys_footer_lay.addStretch()
-        sys_footer_lay.addWidget(btn_check_update)
         sys_footer_lay.addWidget(btn_close_system)
         system_form.addRow(sys_footer)
 
         # ---------------- Menu Bar ----------------
+        # Settings owns only system preferences; download options stay on the chip
         menu_bar = self.menuBar()
         settings_menu = menu_bar.addMenu("&Settings")
-        act_download_opts = settings_menu.addAction("Download &Options…")
-        act_download_opts.triggered.connect(self.open_download_options)
         act_system_prefs = settings_menu.addAction("&System Preferences…")
         act_system_prefs.triggered.connect(self.open_system_preferences)
         help_menu = menu_bar.addMenu("&Help")
