@@ -5,7 +5,7 @@
   </p>
 </div>
 
-Downloading videos or audio shouldn't freeze your desktop or output unplayable files. YouTube Batch Downloader is a lightweight, zero-registry GUI tool built with Python, PySide6, and `yt-dlp`. It runs all active downloads asynchronously in the background so the user interface remains completely responsive.
+Downloading videos or audio shouldn't freeze your desktop or output unplayable files. YouTube Batch Downloader is a lightweight, zero-registry GUI tool built with Python, PySide6, and `yt-dlp`. It launches through an instant loading screen (heavy libraries load behind it), and runs all active downloads asynchronously in the background so the user interface remains completely responsive.
 
 To guarantee maximum playback compatibility across default video players and standard video editors, the downloader automatically prioritizes standard **H.264 (AVC) video** and **AAC audio** formats instead of less-supported formats like AV1 or Opus.
 
@@ -54,12 +54,12 @@ If you modify the source code and want to compile your own self-contained execut
 
 The application interface is designed to make batch queue management straightforward:
 
-1. **Paste Target Links:** Enter your YouTube URLs (one link per line) in the primary text area.
-2. **Configure Download Options:**
-   * **Format:** Select *Best Quality*, *MP4 Video*, or *MP3 Audio*.
-   * **Max Resolution:** Cap the quality at *Best*, *1080p*, *720p*, or *480p*.
+1. **Paste Target Links:** Enter your YouTube URLs (one link per line) in the primary text area. You can also **drag & drop links** anywhere onto the window, and any YouTube link already on your clipboard is loaded automatically at startup.
+2. **Configure Download Options:** Click the compact **⚙ options chip** (e.g. `MP4 · Best`) to open the *Download Options* dialog — pick your **Format** (*Best Quality*, *MP4 Video*, *MP3 Audio*…), cap the **Quality**, set an **Audio Boost**, and toggle behavior preferences. Your choices stay visible on the main window at a glance.
 3. **Set Download Location:** The application automatically creates and defaults to a local `downloads/` directory. You can use the **Browse** button to select any other folder or drive.
-4. **Download:** Click **Add to Queue and Download**. You can safely monitor download progress, speeds, and estimated times of arrival in real-time from the status table.
+4. **Download:** Click **Add to Queue and Download** or simply press **Ctrl+Enter**. You can safely monitor download progress, speeds, and estimated times of arrival in real-time from the status table.
+
+Handy extras: right-click any row in the queue for *Open File / Open Folder / Copy URL / Retry / Cancel / Remove*, duplicate links are skipped automatically, and overall batch progress is mirrored on the Windows taskbar with a tray notification when everything finishes.
 
 ---
 
@@ -69,6 +69,9 @@ The application interface is designed to make batch queue management straightfor
 * <span style="color:#27ae60"><b>Universal Codec Priority:</b></span> Instead of downloading raw `.webm` (VP9/AV1) streams that cause playback errors in legacy editors, the engine automatically remuxes downloads into globally accepted MP4 (H.264 + AAC) files.
 * <span style="color:#e67e22"><b>Smart URL Safeguards:</b></span> To prevent accidental infinite loops, the program intelligently detects dynamic YouTube Mixes or watch-and-playlist combo links and strips them down to single-video downloads.
 * <span style="color:#8e44ad"><b>Zero-Registry Portable Design:</b></span> The application does not write data to your Windows registry or system folders. It is entirely self-contained and runs safely on restricted user profiles without requiring administrator privileges.
+* <span style="color:#00897b"><b>Full-Bandwidth Engine:</b></span> Up to eight videos download simultaneously and audio tracks run in their own wide pool, so fast connections stay saturated instead of idling. Power users on gigabit lines can opt into the bundled aria2c multi-connection engine by adding `"use_aria2": true` to `settings.json`.
+* <span style="color:#5e35b1"><b>Frictionless Input:</b></span> Drag & drop links onto the window, press <b>Ctrl+Enter</b> to start, and let duplicate-link detection keep your queue clean automatically. Clipboard monitoring is debounced and batched — copying several links in a row results in one tidy add instead of popup spam.
+* <span style="color:#c62828"><b>Blazing MP3 Conversion:</b></span> Audio extraction uses benchmark-tuned LAME settings, and audio tasks get a dedicated pool that converts whole batches in parallel across every CPU core — a 20-song queue finishes its conversions several times faster than serial encoding.
 
 ---
 
@@ -80,6 +83,7 @@ The application interface is designed to make batch queue management straightfor
   ```cmd
   pip install --upgrade yt-dlp
   ```
+* **Want even faster downloads?** By default the app balances speed and stability. If your internet line is very fast (gigabit+), open `settings.json` and set `"use_aria2": true` to enable the bundled aria2c engine, which splits each file into 16 parallel connections. Note: per-row progress bars update less frequently while this mode is active, and progress returns to normal once each file finishes its download phase.
 
 <hr>
 
