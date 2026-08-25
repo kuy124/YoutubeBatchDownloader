@@ -157,6 +157,43 @@ class MainWindow(QMainWindow):
         )
         return reply == QMessageBox.Yes
 
+    def _run_post_batch_actions(self):
+        """Executes post-batch actions (open folder, power action) once the queue drains."""
+        if self.chk_open_folder_after.isChecked():
+            folder = self.entry_path.text()
+            if os.path.isdir(folder):
+                try:
+                    os.startfile(folder)
+                except Exception:
+                    pass
+
+        action = self.combo_power_action.currentText()
+        if action == "Shut down":
+            self.desktop_toast.show_notification(
+                "Shutting Down",
+                "PC will shut down in 60 seconds. Run shutdown /a to cancel.",
+                4000
+            )
+            import subprocess
+            try:
+                subprocess.Popen(["shutdown", "/s", "/t", "60"])
+            except Exception as e:
+                log.error(f"Failed to schedule shutdown: {e}")
+        elif action == "Sleep":
+            reply = QMessageBox.question(
+                self,
+                "Sleep Now?",
+                "All downloads are complete. Put the computer to sleep?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply == QMessageBox.Yes:
+                import subprocess
+                try:
+                    subprocess.Popen(["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"])
+                except Exception as e:
+                    log.error(f"Failed to sleep: {e}")
+
     def check_for_updates(self, manual: bool = False):
         worker = UpdateWorker(APP_VERSION, manual=manual)
         worker.signals.update_available.connect(self.on_update_available)
@@ -429,6 +466,17 @@ class MainWindow(QMainWindow):
         self.spin_video_threads.valueChanged.connect(self._on_concurrency_changed)
         system_form.addRow("Video downloads:", self.spin_video_threads)
 
+        system_form.addRow(QLabel("<b>After Batch Completes</b>"))
+        self.chk_open_folder_after = ThemedCheckBox("Open the download folder")
+        self.chk_open_folder_after.setToolTip("Opens the download folder in Explorer when all downloads finish")
+        self.chk_open_folder_after.toggled.connect(lambda _: self.save_current_settings())
+        system_form.addRow(self.chk_open_folder_after)
+
+        self.combo_power_action = QComboBox()
+        self.combo_power_action.addItems(["None", "Shut down", "Sleep"])
+        self.combo_power_action.currentTextChanged.connect(lambda _: self.save_current_settings())
+        system_form.addRow("Power action:", self.combo_power_action)
+
         sys_footer = QWidget()
         sys_footer_lay = QHBoxLayout(sys_footer)
         sys_footer_lay.setContentsMargins(0, 0, 0, 0)
@@ -496,6 +544,11 @@ class MainWindow(QMainWindow):
         btn_clear_completed = QPushButton("Clear Completed")
         btn_clear_completed.clicked.connect(self.clear_completed_tasks)
         action_layout.addWidget(btn_clear_completed)
+
+        self.btn_retry_failed = QPushButton("Retry All Failed")
+        self.btn_retry_failed.clicked.connect(self.retry_all_failed)
+        self.btn_retry_failed.setVisible(False)
+        action_layout.addWidget(self.btn_retry_failed)
 
         layout.addLayout(action_layout)
 
@@ -566,7 +619,7 @@ class MainWindow(QMainWindow):
         for chk in (self.chk_auto_clear, self.chk_monitor_clip,
                     self.chk_completion_sound, self.chk_batch_notify,
                     self.chk_confirm_exit, self.chk_restore_links,
-                    self.chk_expand_playlists):
+                    self.chk_expand_playlists, self.chk_open_folder_after):
             chk.set_tokens(tokens)
 
     def on_format_changed(self, format_name: str):
@@ -643,6 +696,12 @@ class MainWindow(QMainWindow):
         self.spin_video_threads.setValue(int(self.settings.get("max_video_downloads", 8)))
         self.spin_video_threads.blockSignals(False)
         self.video_pool.setMaxThreadCount(self.spin_video_threads.value())
+        self.chk_open_folder_after.blockSignals(True)
+        self.chk_open_folder_after.setChecked(bool(self.settings.get("open_folder_after", False)))
+        self.chk_open_folder_after.blockSignals(False)
+        self.combo_power_action.blockSignals(True)
+        self.combo_power_action.setCurrentText(self.settings.get("power_action", "None"))
+        self.combo_power_action.blockSignals(False)
 
     def save_current_settings(self):
         fmt = self.combo_format.currentText()
@@ -666,6 +725,8 @@ class MainWindow(QMainWindow):
         self.settings.set("expand_playlists", self.chk_expand_playlists.isChecked())
         self.settings.set("max_speed_mb", self.spin_max_speed.value())
         self.settings.set("max_video_downloads", self.spin_video_threads.value())
+        self.settings.set("open_folder_after", self.chk_open_folder_after.isChecked())
+        self.settings.set("power_action", self.combo_power_action.currentText())
 
     def browse_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Download Folder", self.entry_path.text())
@@ -1128,6 +1189,7 @@ class MainWindow(QMainWindow):
         self.update_global_progress()
         self.update_status_summary()
         self.sync_taskbar_progress()
+        self.btn_retry_failed.setVisible(self._count_failed() > 0)
 
     def sync_taskbar_progress(self):
         """Mirrors overall batch progress onto the Windows taskbar button."""
@@ -1472,6 +1534,25 @@ class MainWindow(QMainWindow):
         for tid in completed_ids:
             self.remove_task_row(tid)
 
+    def retry_all_failed(self):
+        """Retries every row whose status starts with 'Failed'."""
+        failed_ids = []
+        for tid, row in list(self.row_mapping.items()):
+            item = self.table.item(row, 1)
+            if item and "Failed" in item.text():
+                failed_ids.append(tid)
+        for tid in failed_ids:
+            self.retry_task(tid)
+
+    def _count_failed(self) -> int:
+        """Counts rows whose status text contains 'Failed'."""
+        count = 0
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 1)
+            if item and "Failed" in item.text():
+                count += 1
+        return count
+
     def update_progress(self, task_id, data):
         row = self.row_mapping.get(task_id)
         if row is None: return
@@ -1575,6 +1656,7 @@ class MainWindow(QMainWindow):
             if self.chk_completion_sound.isChecked():
                 self.play_finished_sound()
             self.notify_batch_done(completion_msg)
+            self._run_post_batch_actions()
 
         if completion_msg:
             self.statusBar.showMessage(completion_msg, 10000)
