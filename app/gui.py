@@ -176,6 +176,8 @@ class MainWindow(QMainWindow):
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
         layout = QVBoxLayout(main_widget)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
 
         # Accept URL/text drops anywhere on the window
         self.setAcceptDrops(True)
@@ -385,12 +387,8 @@ class MainWindow(QMainWindow):
 
         # Single compact chip summarizing current conversion choices
         self.btn_options = QPushButton()
+        self.btn_options.setProperty("variant", "chip")
         self.btn_options.setCursor(Qt.PointingHandCursor)
-        self.btn_options.setStyleSheet(
-            "QPushButton { background-color: #eceff1; border: 1px solid #b0bec5;"
-            " border-radius: 4px; padding: 9px 14px; font-weight: bold; color: #37474f; }"
-            "QPushButton:hover { background-color: #cfd8dc; }"
-        )
         self.btn_options.clicked.connect(self.open_download_options)
         self._update_options_chip_text()
         action_layout.addWidget(self.btn_options)
@@ -398,19 +396,16 @@ class MainWindow(QMainWindow):
         action_layout.addStretch()
 
         btn_download = QPushButton("Add to Queue and Download")
-        btn_download.setMinimumHeight(38)
-        btn_download.setStyleSheet("background-color: #1976d2; color: white; font-weight: bold; border-radius: 3px;")
+        btn_download.setProperty("variant", "primary")
         btn_download.clicked.connect(self.start_downloads)
         action_layout.addWidget(btn_download)
 
         btn_cancel_all = QPushButton("Cancel All")
-        btn_cancel_all.setMinimumHeight(38)
-        btn_cancel_all.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold; border-radius: 3px;")
+        btn_cancel_all.setProperty("variant", "danger")
         btn_cancel_all.clicked.connect(self.cancel_all_tasks)
         action_layout.addWidget(btn_cancel_all)
 
         btn_clear_completed = QPushButton("Clear Completed")
-        btn_clear_completed.setMinimumHeight(38)
         btn_clear_completed.clicked.connect(self.clear_completed_tasks)
         action_layout.addWidget(btn_clear_completed)
 
@@ -467,8 +462,86 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.global_progress)
 
         # ---------------- Bottom Status Bar ----------------
+        self._apply_minimal_theme()
         self.statusBar = self.statusBar()
         self.update_status_summary()
+
+    def _apply_minimal_theme(self):
+        """One cohesive minimalist stylesheet; button variants use dynamic properties."""
+        self.setStyleSheet("""
+            MainWindow, QDialog {
+                background-color: #fafafa;
+            }
+            QLabel { color: #37474f; }
+
+            QPushButton {
+                background-color: #ffffff;
+                border: 1px solid #cfd8dc;
+                border-radius: 4px;
+                padding: 7px 16px;
+                color: #37474f;
+                font-weight: 600;
+            }
+            QPushButton:hover { background-color: #eceff1; border-color: #b0bec5; }
+            QPushButton:pressed { background-color: #cfd8dc; }
+            QPushButton:focus { border-color: #64b5f6; }
+
+            QPushButton[variant="primary"] {
+                background-color: #1976d2; color: #ffffff;
+                border: 1px solid #1976d2; padding: 9px 20px; font-weight: 700;
+            }
+            QPushButton[variant="primary"]:hover { background-color: #1565c0; }
+            QPushButton[variant="primary"]:pressed { background-color: #0d47a1; }
+
+            QPushButton[variant="danger"] {
+                background-color: #ffffff; color: #c62828;
+                border: 1px solid #ef9a9a; padding: 9px 16px; font-weight: 700;
+            }
+            QPushButton[variant="danger"]:hover { background-color: #ffebee; }
+
+            QPushButton[variant="chip"] {
+                background-color: #ffffff; color: #37474f;
+                border: 1px solid #b0bec5; padding: 9px 16px; font-weight: 700;
+            }
+            QPushButton[variant="chip"]:hover { background-color: #eceff1; }
+
+            QPushButton[variant="cell"] {
+                padding: 3px 12px; font-weight: 500; border-radius: 3px;
+            }
+            QPushButton[variant="cell-primary"] {
+                background-color: #0288d1; color: #ffffff;
+                border: 1px solid #0288d1; padding: 4px 14px; font-weight: 600; border-radius: 3px;
+            }
+            QPushButton[variant="cell-primary"]:hover { background-color: #0277bd; }
+            QPushButton[variant="cell-danger"] {
+                background-color: #ffffff; color: #c62828;
+                border: 1px solid #ef9a9a; padding: 4px 14px; font-weight: 600; border-radius: 3px;
+            }
+            QPushButton[variant="cell-danger"]:hover { background-color: #ffebee; }
+
+            QLineEdit, QComboBox {
+                background-color: #ffffff;
+                border: 1px solid #cfd8dc;
+                border-radius: 4px;
+                padding: 5px 8px;
+                color: #37474f;
+            }
+            QLineEdit:focus, QComboBox:focus { border-color: #64b5f6; }
+
+            QTableWidget {
+                gridline-color: #eceff1;
+                selection-background-color: #e3f2fd;
+                selection-color: #37474f;
+            }
+            QHeaderView::section {
+                background-color: #f5f5f5;
+                border: none;
+                border-bottom: 1px solid #cfd8dc;
+                padding: 6px 8px;
+                color: #607d8b;
+                font-weight: 600;
+            }
+        """)
 
     def on_format_changed(self, format_name: str):
         """Dynamically toggles quality dropdown between Video Resolutions and Audio Bitrates."""
@@ -1092,6 +1165,7 @@ class MainWindow(QMainWindow):
     def _make_cancel_button(self, task_id: str) -> QPushButton:
         """Builds a Cancel button wired to the given task id."""
         btn_cancel = QPushButton("Cancel")
+        btn_cancel.setProperty("variant", "cell")
         btn_cancel.clicked.connect(lambda _, tid=task_id: self.cancel_task(tid))
         return btn_cancel
 
@@ -1313,7 +1387,7 @@ class MainWindow(QMainWindow):
         
         # Replace actions column button with instant play button
         btn_open = QPushButton("Open File")
-        btn_open.setStyleSheet("background-color: #0288d1; color: white; font-weight: bold;")
+        btn_open.setProperty("variant", "cell-primary")
         btn_open.clicked.connect(lambda _, fp=file_path: self.open_file(fp))
         self.table.setCellWidget(row, 5, btn_open)
         
@@ -1348,7 +1422,7 @@ class MainWindow(QMainWindow):
         
         # Replace the Cancel button with a highly visible "Retry" button
         btn_retry = QPushButton("Retry")
-        btn_retry.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold;")
+        btn_retry.setProperty("variant", "cell-danger")
         btn_retry.clicked.connect(lambda _, tid=task_id: self.retry_task(tid))
         self.table.setCellWidget(row, 5, btn_retry)
             
