@@ -39,23 +39,8 @@ class DesktopToast(QWidget):
         self.card.setGraphicsEffect(shadow)
 
         card_layout = QHBoxLayout(self.card)
-        card_layout.setContentsMargins(14, 12, 16, 12)
+        card_layout.setContentsMargins(16, 12, 16, 12)
         card_layout.setSpacing(12)
-
-        # Vibrant Checkmark Badge
-        self.badge = QLabel("✓")
-        self.badge.setFixedSize(30, 30)
-        self.badge.setAlignment(Qt.AlignCenter)
-        self.badge.setStyleSheet("""
-            QLabel {
-                background-color: #0284c7;
-                color: #ffffff;
-                font-size: 14px;
-                font-weight: bold;
-                border-radius: 15px;
-            }
-        """)
-        card_layout.addWidget(self.badge)
 
         # Text Section
         text_layout = QVBoxLayout()

@@ -113,7 +113,7 @@ class MainWindow(QMainWindow):
     def on_monitor_toggled(self, checked: bool):
         if checked:
             self.desktop_toast.show_notification(
-                "✓ Clipboard Monitor Active",
+                "Clipboard Monitor Active",
                 "Any copied YouTube links will automatically be added to your queue.",
                 2500
             )
@@ -541,7 +541,7 @@ class MainWindow(QMainWindow):
         boost_pct = self.combo_boost.currentText().split(' ')[0]
 
         short_fmt = fmt.replace(' Video', '').replace(' Audio', '')
-        text = f"⚙  {short_fmt} · {qual}"
+        text = f"Options: {short_fmt} · {qual}"
         if not boost_pct.startswith('100'):
             text += f" · Boost {boost_pct}"
         self.btn_options.setText(text)
@@ -646,7 +646,7 @@ class MainWindow(QMainWindow):
 
         display = added[0] if len(added) == 1 else f"{added[0][:42]}..."
         self.desktop_toast.show_notification(
-            "✓ YouTube Link Added to Queue" if len(added) == 1 else f"✓ {len(added)} Links Added",
+            "YouTube Link Added to Queue" if len(added) == 1 else f"{len(added)} Links Added",
             display,
             2800
         )
@@ -667,7 +667,7 @@ class MainWindow(QMainWindow):
             return
         self.url_input.setPlainText("\n".join(links))
         self.desktop_toast.show_notification(
-            "✓ Clipboard Loaded",
+            "Clipboard Loaded",
             f"{len(links)} YouTube link{'s' if len(links) != 1 else ''} ready — Ctrl+Enter to download",
             3200
         )
@@ -710,7 +710,7 @@ class MainWindow(QMainWindow):
         if added:
             self.url_input.setPlainText("\n".join(current_lines + added))
             self.desktop_toast.show_notification(
-                "✓ Links Added",
+                "Links Added",
                 f"{len(added)} link{'s' if len(added) != 1 else ''} appended — press Ctrl+Enter to download",
                 2800
             )
@@ -1106,7 +1106,7 @@ class MainWindow(QMainWindow):
 
         if skipped_dupes:
             self.desktop_toast.show_notification(
-                "✓ Duplicates Skipped",
+                "Duplicates Skipped",
                 f"{skipped_dupes} duplicate link{'s' if skipped_dupes != 1 else ''} ignored.",
                 2600
             )
