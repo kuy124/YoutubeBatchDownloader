@@ -120,8 +120,16 @@ class MainWindow(QMainWindow):
         self.save_current_settings()
 
     def closeEvent(self, event):
-        """Drains background pools so interpreter shutdown never races live worker
-        threads (prevents 'can't register atexit after shutdown' tracebacks)."""
+        """Optionally confirms exit mid-batch, persists the link list, then drains
+        background pools so interpreter shutdown never races live worker threads."""
+        if (self.chk_confirm_exit.isChecked() and self.active_workers
+                and not self._confirm_close_with_downloads()):
+            event.ignore()
+            return
+
+        if self.chk_restore_links.isChecked():
+            self.settings.set("saved_links", self.url_input.toPlainText())
+
         self.preview_timer.stop()
         self.clipboard_timer.stop()
         self.ui_refresh_timer.stop()
@@ -132,6 +140,18 @@ class MainWindow(QMainWindow):
         self.video_pool.waitForDone(2000)
         self.audio_pool.waitForDone(2000)
         super().closeEvent(event)
+
+    def _confirm_close_with_downloads(self) -> bool:
+        """Asks whether to really exit while downloads are running or queued."""
+        reply = QMessageBox.question(
+            self,
+            "Downloads in Progress",
+            f"{len(self.active_workers)} download(s) are running or waiting in the queue.\n\n"
+            "Close anyway and cancel them?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return reply == QMessageBox.Yes
 
     def check_for_updates(self, manual: bool = False):
         worker = UpdateWorker(APP_VERSION, manual=manual)
@@ -376,8 +396,16 @@ class MainWindow(QMainWindow):
         system_form.addRow(QLabel("<b>Behavior</b>"))
         self.chk_auto_clear = QCheckBox("Automatically clear completed downloads (after 2 seconds)")
         self.chk_monitor_clip = QCheckBox("Auto-Add links from Clipboard (Real-time Monitor)")
+        self.chk_completion_sound = QCheckBox("Play a sound when all downloads finish")
+        self.chk_batch_notify = QCheckBox("Show a notification when all downloads finish")
+        self.chk_confirm_exit = QCheckBox("Ask before closing while downloads are running")
+        self.chk_restore_links = QCheckBox("Restore the link list on launch")
         system_form.addRow(self.chk_auto_clear)
         system_form.addRow(self.chk_monitor_clip)
+        system_form.addRow(self.chk_completion_sound)
+        system_form.addRow(self.chk_batch_notify)
+        system_form.addRow(self.chk_confirm_exit)
+        system_form.addRow(self.chk_restore_links)
 
         sys_footer = QWidget()
         sys_footer_lay = QHBoxLayout(sys_footer)
@@ -558,10 +586,16 @@ class MainWindow(QMainWindow):
         self.combo_boost.setCurrentText(self.settings.get("audio_boost", "100% (Original)"))
         # blockSignals prevents the "Monitor Active" toast + settings save from
         # firing as a spurious side effect of restoring checkboxes at startup
-        for chk, value in ((self.chk_auto_clear, self.settings.get("auto_clear")),
-                           (self.chk_monitor_clip, self.settings.get("monitor_clipboard"))):
+        for chk, key, default in (
+            (self.chk_auto_clear, "auto_clear", False),
+            (self.chk_monitor_clip, "monitor_clipboard", False),
+            (self.chk_completion_sound, "completion_sound", True),
+            (self.chk_batch_notify, "batch_notifications", True),
+            (self.chk_confirm_exit, "confirm_exit_downloading", True),
+            (self.chk_restore_links, "restore_links", False),
+        ):
             chk.blockSignals(True)
-            chk.setChecked(value)
+            chk.setChecked(bool(self.settings.get(key, default)))
             chk.blockSignals(False)
 
     def save_current_settings(self):
@@ -579,6 +613,10 @@ class MainWindow(QMainWindow):
         self.settings.set("audio_boost", self.combo_boost.currentText())
         self.settings.set("auto_clear", self.chk_auto_clear.isChecked())
         self.settings.set("monitor_clipboard", self.chk_monitor_clip.isChecked())
+        self.settings.set("completion_sound", self.chk_completion_sound.isChecked())
+        self.settings.set("batch_notifications", self.chk_batch_notify.isChecked())
+        self.settings.set("confirm_exit_downloading", self.chk_confirm_exit.isChecked())
+        self.settings.set("restore_links", self.chk_restore_links.isChecked())
 
     def browse_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Download Folder", self.entry_path.text())
@@ -652,9 +690,15 @@ class MainWindow(QMainWindow):
         )
 
     def prefill_from_clipboard(self):
-        """Loads any YouTube links already on the clipboard straight into the input."""
+        """Restores the saved link list when enabled, otherwise loads clipboard links."""
         if self.url_input.toPlainText().strip():
             return
+        if self.chk_restore_links.isChecked():
+            saved = self.settings.get("saved_links", "") or ""
+            if saved.strip():
+                self.url_input.setPlainText(saved)
+                self._last_clipboard_text = None  # monitor stays free for new copies
+                return
         try:
             text = self.clipboard.text() or ""
         except Exception:
@@ -1045,6 +1089,9 @@ class MainWindow(QMainWindow):
 
     def notify_batch_done(self, completion_msg: str = ""):
         """Fires a tray notification and flashes the window when a whole batch ends."""
+        if not self.chk_batch_notify.isChecked():
+            return
+
         completed = failed = 0
         for row in range(self.table.rowCount()):
             item = self.table.item(row, 1)
@@ -1370,7 +1417,8 @@ class MainWindow(QMainWindow):
                 batch_sec = int(time.time() - self.batch_start_time)
                 completion_msg = f"Your download completed in {format_elapsed_words(batch_sec)}"
 
-            self.play_finished_sound()
+            if self.chk_completion_sound.isChecked():
+                self.play_finished_sound()
             self.notify_batch_done(completion_msg)
 
         if completion_msg:
@@ -1395,7 +1443,7 @@ class MainWindow(QMainWindow):
         self._cleanup_worker(task_id)
 
         # Play system sound notification if all active processing is finished (even on fail)
-        if len(self.active_workers) == 0:
+        if len(self.active_workers) == 0 and self.chk_completion_sound.isChecked():
             self.play_finished_sound()
 
     def _cleanup_worker(self, task_id):

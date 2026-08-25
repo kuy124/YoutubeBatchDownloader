@@ -20,6 +20,11 @@ class Settings:
             "monitor_clipboard": False,
             "theme": "Dark",
             "use_aria2": False,
+            "completion_sound": True,
+            "batch_notifications": True,
+            "confirm_exit_downloading": True,
+            "restore_links": False,
+            "saved_links": "",
             "threads": max(12, (os.cpu_count() or 4) * 2)
         }
         self.load()
