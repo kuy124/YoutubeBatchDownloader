@@ -61,6 +61,19 @@ echo [INFO] FFmpeg not found. Downloading lightweight binary (37MB)...
 powershell -Command "try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v4.4.1/ffmpeg-4.4.1-win-64.zip' -OutFile 'ffmpeg.zip' -ErrorAction Stop; echo '[OK] Download complete. Extracting...'; Expand-Archive -Path 'ffmpeg.zip' -DestinationPath 'temp_ffmpeg' -Force; Copy-Item 'temp_ffmpeg\ffmpeg.exe' -Destination 'tools\ffmpeg.exe'; Remove-Item 'ffmpeg.zip' -Force; Remove-Item 'temp_ffmpeg' -Recurse -Force; echo '[OK] Lightweight FFmpeg successfully installed to tools!' } catch { echo '[ERROR] Failed to download FFmpeg automatically. Please install it manually as described in README.' }"
 
 :ffmpeg_ok
+
+:: Check for aria2 locally (optional multi-connection accelerator)
+echo.
+echo Checking for aria2...
+if exist tools\aria2c.exe (
+    echo [OK] Local aria2 binary detected.
+    goto aria2_ok
+)
+
+echo [INFO] aria2 not found. Downloading optional accelerator (~4MB)...
+powershell -Command "try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0-win-64bit-build1.zip' -OutFile 'aria2.zip' -ErrorAction Stop; Expand-Archive -Path 'aria2.zip' -DestinationPath 'temp_aria2' -Force; Copy-Item 'temp_aria2\aria2-1.37.0-win-64bit-build1\aria2c.exe' -Destination 'tools\aria2c.exe'; Remove-Item 'aria2.zip' -Force; Remove-Item 'temp_aria2' -Recurse -Force; echo '[OK] aria2 installed to tools!' } catch { echo '[WARN] aria2 download failed (optional component, app works without it).' }"
+
+:aria2_ok
 echo.
 echo ========================================================
 echo Installation complete! 

@@ -24,6 +24,12 @@ echo [INFO] tools/ffmpeg.exe is missing. Downloading lightweight build (37MB)...
 powershell -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v4.4.1/ffmpeg-4.4.1-win-64.zip' -OutFile 'ffmpeg.zip' -ErrorAction Stop; Expand-Archive -Path 'ffmpeg.zip' -DestinationPath 'temp_ffmpeg' -Force; Copy-Item 'temp_ffmpeg\ffmpeg.exe' -Destination 'tools\ffmpeg.exe'; Remove-Item 'ffmpeg.zip' -Force; Remove-Item 'temp_ffmpeg' -Recurse -Force"
 :ffmpeg_exists
 
+:: 3b. Fast aria2 check (bundled for optional multi-connection downloads)
+if exist tools\aria2c.exe goto aria2_exists
+echo [INFO] tools/aria2c.exe is missing. Downloading optional accelerator (~4MB)...
+powershell -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0-win-64bit-build1.zip' -OutFile 'aria2.zip' -ErrorAction Stop; Expand-Archive -Path 'aria2.zip' -DestinationPath 'temp_aria2' -Force; Copy-Item 'temp_aria2\aria2-1.37.0-win-64bit-build1\aria2c.exe' -Destination 'tools\aria2c.exe'; Remove-Item 'aria2.zip' -Force; Remove-Item 'temp_aria2' -Recurse -Force"
+:aria2_exists
+
 :: 4. Fast check for PyInstaller executable (Instant 0ms check)
 if exist venv\Scripts\pyinstaller.exe goto pyinstaller_ok
 echo [INFO] Installing PyInstaller in virtual environment...
