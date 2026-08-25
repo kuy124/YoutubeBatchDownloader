@@ -2,6 +2,7 @@ import concurrent.futures
 import os
 import re
 import subprocess
+import threading  # Guards the shared in-memory title cache across worker threads
 import time  # Used for cooling-off pause during automatic retries
 import urllib.request
 import yt_dlp
@@ -13,6 +14,7 @@ from .utils import (
     format_display_title,
     format_elapsed_words,
     format_hms,
+    get_aria2_path,
     get_ffmpeg_path,
     image_to_jpeg_bytes,
     insecure_ssl_context,
@@ -24,6 +26,24 @@ from .converter import convert_m4a_to_mp3_fast, embed_wav_metadata
 
 class TitlePreviewSignals(QObject):
     fetched = Signal(list)
+
+# In-memory cache so re-pasting the same links never repeats network lookups
+_TITLE_CACHE = {}
+_TITLE_CACHE_LOCK = threading.Lock()
+_TITLE_CACHE_LIMIT = 512
+
+
+def _cached_title(clean_url: str):
+    with _TITLE_CACHE_LOCK:
+        return _TITLE_CACHE.get(clean_url)
+
+
+def _store_title(clean_url: str, title: str):
+    with _TITLE_CACHE_LOCK:
+        if len(_TITLE_CACHE) >= _TITLE_CACHE_LIMIT:
+            _TITLE_CACHE.clear()
+        _TITLE_CACHE[clean_url] = title
+
 
 class TitlePreviewWorker(QRunnable):
     def __init__(self, raw_lines: list):
@@ -40,9 +60,14 @@ class TitlePreviewWorker(QRunnable):
 
         clean_url = clean_youtube_url(line)
 
+        cached = _cached_title(clean_url)
+        if cached:
+            return cached
+
         # FAST PATH 1: Ultra-fast 50ms YouTube oEmbed JSON API
         oembed_title = fetch_oembed_title(clean_url)
         if oembed_title:
+            _store_title(clean_url, oembed_title)
             return oembed_title
 
         # FAST PATH 2: Fallback to lightweight yt-dlp
@@ -62,7 +87,9 @@ class TitlePreviewWorker(QRunnable):
                 if not info:
                     return "Failed to load title"
                 title = info.get('title', 'Unknown Title')
-                return format_display_title(title, resolve_uploader(info))
+                resolved = format_display_title(title, resolve_uploader(info))
+                _store_title(clean_url, resolved)
+                return resolved
         except Exception:
             return "Failed to load title"
 
@@ -617,6 +644,13 @@ class DownloadWorker(QRunnable):
         return final_path
 
     def run(self):
+        # Fast-exit path for tasks cancelled while still queued in the capped pool
+        if self.is_cancelled:
+            log.info(f"Task {self.task_id} cancelled before starting; skipping.")
+            self.cleanup_partial_files(self.final_filename)
+            self.signals.error.emit(self.task_id, "Cancelled.")
+            return
+
         log.info(f"Starting stream download task {self.task_id} for URL: {self.url}")
 
         # Timestamp anchor for measuring the real URL/stream extraction duration
@@ -653,7 +687,7 @@ class DownloadWorker(QRunnable):
             'nocheckcertificate': True,
             'noplaylist': True,
             'cachedir': False,
-            'concurrent_fragment_downloads': 8,  # Downloads 8 fragments simultaneously in parallel
+            'concurrent_fragment_downloads': 16,  # Parallel fragments for HLS/DASH streams
             'throttled_rate': 102400,           # Drops & restarts connection if YouTube throttles speed below 100KB/s
             'retries': 15,
             'fragment_retries': 15,
@@ -667,6 +701,21 @@ class DownloadWorker(QRunnable):
 
         if ffmpeg_path:
             ydl_opts['ffmpeg_location'] = ffmpeg_path
+
+        # Opt-in multi-connection engine (settings.json: "use_aria2": true).
+        # aria2c splits single files into 16 ranged connections, which saturates
+        # very fast lines; benchmarked slower on standard lines so it stays off
+        # by default. Note: live progress ticks pause while it runs.
+        if self.options.get('use_aria2'):
+            aria2_path = get_aria2_path()
+            if aria2_path:
+                ydl_opts['external_downloader'] = aria2_path
+            else:
+                log.warning(
+                    "use_aria2 is enabled in settings but no aria2c.exe was found "
+                    "(tools/aria2c.exe or PATH). Falling back to the native "
+                    "downloader. Run install.bat to fetch it."
+                )
 
         fmt = self.options.get('format', 'Best Quality (MKV)')
         quality = self.options.get('quality', 'Best')
