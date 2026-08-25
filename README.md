@@ -72,6 +72,7 @@ Handy extras: right-click any row in the queue for *Open File / Open Folder / Co
 * <span style="color:#00897b"><b>Full-Bandwidth Engine:</b></span> Up to eight videos download simultaneously and audio tracks run in their own wide pool, so fast connections stay saturated instead of idling. Power users on gigabit lines can opt into the bundled aria2c multi-connection engine by adding `"use_aria2": true` to `settings.json`.
 * <span style="color:#5e35b1"><b>Frictionless Input:</b></span> Drag & drop links onto the window, press <b>Ctrl+Enter</b> to start, and let duplicate-link detection keep your queue clean automatically. Clipboard monitoring is debounced and batched — copying several links in a row results in one tidy add instead of popup spam.
 * <span style="color:#455a64"><b>Dark & Light Themes:</b></span> The interface ships in a sleek dark theme by default, switchable to light anytime from **Download Options → Theme** — applied live and remembered across sessions.
+* <span style="color:#00695c"><b>Behavior Controls:</b></span> Fine-tune the app in **Settings → System Preferences**: completion sound and finish notifications on/off, an exit confirmation while downloads run, and optional link-list restore between sessions.
 * <span style="color:#c62828"><b>Blazing MP3 Conversion:</b></span> Audio extraction uses benchmark-tuned LAME settings, and audio tasks get a dedicated pool that converts whole batches in parallel across every CPU core — a 20-song queue finishes its conversions several times faster than serial encoding.
 
 ---
