@@ -38,6 +38,28 @@ def get_ffmpeg_path() -> str:
     return ""
 
 
+def get_aria2_path() -> str:
+    """Returns the absolute path to aria2c.exe (bundled, local workspace, or global system path)."""
+    # 1. Check if running inside PyInstaller virtual unpacked environment (_MEIPASS)
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        bundled_path = os.path.join(sys._MEIPASS, "tools", "aria2c.exe")
+        if os.path.exists(bundled_path):
+            return bundled_path
+
+    # 2. Check local tools directory and root directory
+    for rel_path in [os.path.join("tools", "aria2c.exe"), "aria2c.exe"]:
+        local_path = os.path.join(get_root_dir(), rel_path)
+        if os.path.exists(local_path):
+            return local_path
+
+    # 3. Check system PATH globally
+    system_path = shutil.which('aria2c')
+    if system_path:
+        return system_path
+
+    return ""
+
+
 def get_icon_path() -> str:
     """Returns the absolute path to icon.ico (bundled or local workspace)."""
     # 1. Check if running inside PyInstaller virtual unpacked environment (_MEIPASS)
@@ -67,6 +89,16 @@ def clean_youtube_url(url: str) -> str:
 def is_youtube_url(text: str) -> bool:
     """Returns True when the text looks like a YouTube link."""
     return "youtube.com/" in text or "youtu.be/" in text
+
+
+def extract_http_links(text: str) -> list:
+    """Pulls every http(s) URL out of arbitrary pasted/dropped text, preserving order."""
+    links = []
+    for token in re.split(r'\s+', (text or '').strip()):
+        token = token.strip().strip('<>"\'').rstrip(',;)];')
+        if token[:7].lower() == "http://" or token[:8].lower() == "https://":
+            links.append(token)
+    return links
 
 
 def format_display_title(title: str, uploader: str) -> str:
