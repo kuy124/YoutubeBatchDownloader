@@ -3,6 +3,7 @@ import uuid
 import time
 import webbrowser
 import winsound  # Standard library module to trigger clean system chimes
+from urllib.parse import parse_qs, urlparse
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                                QLabel, QTextEdit, QPushButton, QComboBox, QCheckBox,
                                QLineEdit, QFileDialog, QTableWidget, QTableWidgetItem,
@@ -25,7 +26,7 @@ MAX_VIDEO_DOWNLOADS = 8
 MAX_AUDIO_DOWNLOADS = min(max(os.cpu_count() or 4, 4), 16)
 
 from .settings import Settings
-from .downloader import DownloadWorker, TitlePreviewWorker
+from .downloader import DownloadWorker, TitlePreviewWorker, PlaylistExpandWorker
 from .logger import log
 from .themes import THEMES, build_theme, get_active_tokens
 from .updater import APP_VERSION, UpdateWorker
@@ -64,6 +65,8 @@ class MainWindow(QMainWindow):
         self.active_metrics = {}    # Tracks realtime speed, bytes left, and ETA per worker
         self.extraction_samples = []  # Rolling window of measured extraction durations
         self.batch_start_time = None
+        self._expanding_workers = {}   # url → PlaylistExpandWorker for active expansions
+        self._expanding_placeholders = {}  # url → task_id of "Expanding…" placeholder row
 
         self.preview_timer = QTimer()
         self.preview_timer.setSingleShot(True)
@@ -1133,6 +1136,15 @@ class MainWindow(QMainWindow):
         if not self.isActiveWindow():
             QApplication.alert(self, 2000)
 
+    @staticmethod
+    def _is_playlist_url(url: str) -> bool:
+        """Returns True when the URL carries a YouTube playlist parameter."""
+        try:
+            parsed = urlparse(url)
+            return 'list' in parse_qs(parsed.query)
+        except Exception:
+            return False
+
     def start_downloads(self):
         raw_url_lines = self.url_input.toPlainText().split('\n')
         raw_preview_lines = self.preview_input.toPlainText().split('\n')
@@ -1187,8 +1199,104 @@ class MainWindow(QMainWindow):
             'queued_time': self.batch_start_time
         }
 
+        expand_on = self.chk_expand_playlists.isChecked()
+
         for url, cached_title in unique_entries:
-            self.add_task(url, options, title=cached_title)
+            if expand_on and self._is_playlist_url(url):
+                self._expand_playlist(url, options)
+            else:
+                self.add_task(url, options, title=cached_title)
+
+    def _expand_playlist(self, url: str, options: dict):
+        """Shows an 'Expanding…' placeholder row and launches a flat-extraction
+        worker that will replace it with numbered individual download tasks."""
+        # Insert a visible placeholder row
+        task_id = str(uuid.uuid4())
+        row_idx = self.table.rowCount()
+        self.table.insertRow(row_idx)
+        title_item = QTableWidgetItem(f"Expanding playlist: {url[:60]}...")
+        status_item = QTableWidgetItem("Expanding…")
+        status_item.setForeground(QBrush(QColor("#1565c0")))
+        self.table.setItem(row_idx, 0, title_item)
+        self.table.setItem(row_idx, 1, status_item)
+        self.table.setCellWidget(row_idx, 2, QProgressBar())
+        self.table.setItem(row_idx, 3, QTableWidgetItem("-"))
+        self.table.setItem(row_idx, 4, QTableWidgetItem("-"))
+        # Cancel button for the expansion worker
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.setProperty("variant", "cell")
+        btn_cancel.clicked.connect(lambda _, u=url: self._cancel_playlist_expansion(u))
+        self.table.setCellWidget(row_idx, 5, btn_cancel)
+        self.row_mapping[task_id] = row_idx
+        self.task_data[task_id] = {'url': url, 'options': options}
+        self._expanding_placeholders[url] = task_id
+
+        worker = PlaylistExpandWorker(url, task_id)
+        worker.signals.expanded.connect(self._on_playlist_expanded)
+        worker.signals.single.connect(self._on_playlist_single)
+        worker.signals.error.connect(self._on_playlist_error)
+        self._expanding_workers[url] = worker
+        self.threadpool.start(worker)
+
+    def _cancel_playlist_expansion(self, url: str):
+        worker = self._expanding_workers.pop(url, None)
+        if worker:
+            worker.cancel()
+        tid = self._expanding_placeholders.pop(url, None)
+        if tid:
+            self.remove_task_row(tid)
+
+    def _on_playlist_expanded(self, original_url: str, entries: list):
+        self._expanding_workers.pop(original_url, None)
+        tid = self._expanding_placeholders.pop(original_url, None)
+        if tid:
+            self.remove_task_row(tid)
+
+        fmt = self.combo_format.currentText()
+        options = {
+            'download_path': self.entry_path.text(),
+            'format': fmt,
+            'quality': self.combo_quality.currentText(),
+            'audio_boost': self.combo_boost.currentText(),
+            'use_aria2': bool(self.settings.get("use_aria2", False)),
+            'queued_time': self.batch_start_time or time.time()
+        }
+
+        for idx, (title, watch_url) in enumerate(entries, 1):
+            numbered_title = f"{idx:02d} - {title}"
+            self.add_task(watch_url, options, title=numbered_title)
+
+        self.desktop_toast.show_notification(
+            "Playlist Expanded",
+            f"{len(entries)} videos added to queue",
+            2800
+        )
+
+    def _on_playlist_single(self, original_url: str, clean_url: str):
+        self._expanding_workers.pop(original_url, None)
+        tid = self._expanding_placeholders.pop(original_url, None)
+        if tid:
+            self.remove_task_row(tid)
+
+        fmt = self.combo_format.currentText()
+        options = {
+            'download_path': self.entry_path.text(),
+            'format': fmt,
+            'quality': self.combo_quality.currentText(),
+            'audio_boost': self.combo_boost.currentText(),
+            'use_aria2': bool(self.settings.get("use_aria2", False)),
+            'queued_time': self.batch_start_time or time.time()
+        }
+        self.add_task(clean_url, options)
+
+    def _on_playlist_error(self, original_url: str, error_msg: str):
+        self._expanding_workers.pop(original_url, None)
+        tid = self._expanding_placeholders.pop(original_url, None)
+        if tid and tid in self.row_mapping:
+            row = self.row_mapping[tid]
+            self.table.item(row, 1).setText(error_msg)
+            self.table.item(row, 1).setForeground(QBrush(QColor("#d32f2f")))
+        self.desktop_toast.show_notification("Playlist Expansion Failed", error_msg[:60], 3000)
 
     def _make_cancel_button(self, task_id: str) -> QPushButton:
         """Builds a Cancel button wired to the given task id."""

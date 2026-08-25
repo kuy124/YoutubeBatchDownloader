@@ -20,7 +20,9 @@ from .utils import (
     insecure_ssl_context,
     is_youtube_url,
     resolve_uploader,
+    extract_http_links,
 )
+from urllib.parse import parse_qs, urlparse
 from .logger import log
 from .converter import convert_m4a_to_mp3_fast, embed_wav_metadata
 
@@ -104,6 +106,79 @@ class TitlePreviewWorker(QRunnable):
             previews = list(executor.map(self._fetch_single_title, self.raw_lines))
 
         self.signals.fetched.emit(previews)
+
+
+class PlaylistExpandSignals(QObject):
+    expanded = Signal(str, list)   # original_url, [(title, watch_url), ...]
+    single = Signal(str, str)     # original_url, resolved_clean_url (not a playlist)
+    error = Signal(str, str)      # original_url, error message
+
+
+class PlaylistExpandWorker(QRunnable):
+    """Enumerates playlist entries via flat extraction so each video can be
+    queued individually with a numbered prefix in the queue table."""
+
+    def __init__(self, url: str, task_id: str):
+        super().__init__()
+        self.url = url
+        self.task_id = task_id
+        self.is_cancelled = False
+        self.signals = PlaylistExpandSignals()
+
+    def cancel(self):
+        self.is_cancelled = True
+
+    def run(self):
+        if self.is_cancelled:
+            self.signals.error.emit(self.url, "Cancelled.")
+            return
+
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'skip_download': True,
+            'extract_flat': True,
+            'noplaylist': False,
+            'socket_timeout': 10,
+            'nocheckcertificate': True,
+        }
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(self.url, download=False)
+
+            if self.is_cancelled:
+                self.signals.error.emit(self.url, "Cancelled.")
+                return
+
+            entries = info.get('entries')
+            if not entries:
+                # Not a playlist or empty — treat as a single video
+                clean = clean_youtube_url(self.url)
+                self.signals.single.emit(self.url, clean)
+                return
+
+            result = []
+            for idx, entry in enumerate(entries):
+                if self.is_cancelled:
+                    self.signals.error.emit(self.url, "Cancelled.")
+                    return
+                title = entry.get('title') or f"Video {idx + 1}"
+                watch_url = entry.get('url') or entry.get('webpage_url', '')
+                if not watch_url and entry.get('id'):
+                    watch_url = f"https://www.youtube.com/watch?v={entry['id']}"
+                if watch_url:
+                    result.append((title, watch_url))
+
+            if result:
+                self.signals.expanded.emit(self.url, result)
+            else:
+                self.signals.error.emit(self.url, "Failed: playlist is empty or private.")
+        except Exception as e:
+            if self.is_cancelled:
+                self.signals.error.emit(self.url, "Cancelled.")
+            else:
+                self.signals.error.emit(self.url, f"Failed: {str(e)[:50]}")
 
 class MetadataSignals(QObject):
     finished = Signal(str, dict)  # task_id, metadata_dict
