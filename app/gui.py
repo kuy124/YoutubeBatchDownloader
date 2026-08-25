@@ -27,10 +27,10 @@ MAX_AUDIO_DOWNLOADS = min(max(os.cpu_count() or 4, 4), 16)
 from .settings import Settings
 from .downloader import DownloadWorker, TitlePreviewWorker
 from .logger import log
-from .themes import THEMES, build_theme
+from .themes import THEMES, build_theme, get_active_tokens
 from .updater import APP_VERSION, UpdateWorker
 from .utils import extract_http_links, format_elapsed_words, format_hms, get_icon_path, is_youtube_url
-from .widgets import DesktopToast
+from .widgets import DesktopToast, ThemedCheckBox
 from .win_taskbar import WinTaskbarProgress
 
 class MainWindow(QMainWindow):
@@ -394,12 +394,12 @@ class MainWindow(QMainWindow):
         system_form.addRow("Theme:", theme_row)
 
         system_form.addRow(QLabel("<b>Behavior</b>"))
-        self.chk_auto_clear = QCheckBox("Automatically clear completed downloads (after 2 seconds)")
-        self.chk_monitor_clip = QCheckBox("Auto-Add links from Clipboard (Real-time Monitor)")
-        self.chk_completion_sound = QCheckBox("Play a sound when all downloads finish")
-        self.chk_batch_notify = QCheckBox("Show a notification when all downloads finish")
-        self.chk_confirm_exit = QCheckBox("Ask before closing while downloads are running")
-        self.chk_restore_links = QCheckBox("Restore the link list on launch")
+        self.chk_auto_clear = ThemedCheckBox("Automatically clear completed downloads (after 2 seconds)")
+        self.chk_monitor_clip = ThemedCheckBox("Auto-Add links from Clipboard (Real-time Monitor)")
+        self.chk_completion_sound = ThemedCheckBox("Play a sound when all downloads finish")
+        self.chk_batch_notify = ThemedCheckBox("Show a notification when all downloads finish")
+        self.chk_confirm_exit = ThemedCheckBox("Ask before closing while downloads are running")
+        self.chk_restore_links = ThemedCheckBox("Restore the link list on launch")
         system_form.addRow(self.chk_auto_clear)
         system_form.addRow(self.chk_monitor_clip)
         system_form.addRow(self.chk_completion_sound)
@@ -526,11 +526,20 @@ class MainWindow(QMainWindow):
         QApplication.instance().setPalette(palette)
         self.setStyleSheet(qss)
         self._current_theme = "Light" if isinstance(theme_name, str) and theme_name.strip().lower() == "light" else "Dark"
+        self._refresh_checkbox_tokens()
 
     def _change_theme(self, display_name: str):
         """Persists and live-applies a theme chosen in the options dialog."""
         self.settings.set("theme", display_name)
         self._apply_theme()
+
+    def _refresh_checkbox_tokens(self):
+        """Pushes the current theme tokens into every ThemedCheckBox."""
+        tokens = get_active_tokens()
+        for chk in (self.chk_auto_clear, self.chk_monitor_clip,
+                    self.chk_completion_sound, self.chk_batch_notify,
+                    self.chk_confirm_exit, self.chk_restore_links):
+            chk.set_tokens(tokens)
 
     def on_format_changed(self, format_name: str):
         """Dynamically toggles quality dropdown between Video Resolutions and Audio Bitrates."""

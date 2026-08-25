@@ -149,13 +149,6 @@ QHeaderView::section {
 }
 
 QCheckBox { color: ${text}; spacing: 6px; }
-QCheckBox::indicator {
-    width: 16px; height: 16px;
-    border: 1px solid ${border}; border-radius: 3px;
-    background-color: ${surface};
-}
-QCheckBox::indicator:hover { border-color: ${focus}; }
-QCheckBox::indicator:checked { background-color: ${primary}; border-color: ${primary}; }
 
 #globalProgress {
     border: 1px solid ${border};
@@ -204,14 +197,25 @@ def _build_palette(t: dict) -> QPalette:
     return pal
 
 
+_ACTIVE_TOKENS: dict = {}
+
+
+def get_active_tokens() -> dict:
+    """Returns the token dict for the currently active theme."""
+    return _ACTIVE_TOKENS
+
+
 def build_theme(name: str):
     """Returns (stylesheet, palette) for 'Dark' or 'Light' (case-insensitive).
 
     Unknown names fall back to Dark so a corrupted settings value can never
-    produce an unreadable half-styled window.
+    produce an unreadable half-styled window.  Also stores the active token
+    dict so themed widgets (ThemedCheckBox) can read colours at paint time.
     """
+    global _ACTIVE_TOKENS
     if isinstance(name, str) and name.strip().lower() == "light":
         tokens = _LIGHT
     else:
         tokens = _DARK
+    _ACTIVE_TOKENS = tokens
     return _QSS_TEMPLATE.safe_substitute(tokens), _build_palette(tokens)
