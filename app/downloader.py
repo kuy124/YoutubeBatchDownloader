@@ -777,6 +777,10 @@ class DownloadWorker(QRunnable):
         if ffmpeg_path:
             ydl_opts['ffmpeg_location'] = ffmpeg_path
 
+        max_speed_mb = int(self.options.get('max_speed_mb', 0))
+        if max_speed_mb > 0:
+            ydl_opts['ratelimit'] = max_speed_mb * 1024 * 1024
+
         # Opt-in multi-connection engine (settings.json: "use_aria2": true).
         # aria2c splits single files into 16 ranged connections, which saturates
         # very fast lines; benchmarked slower on standard lines so it stays off

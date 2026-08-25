@@ -5,10 +5,11 @@ import webbrowser
 import winsound  # Standard library module to trigger clean system chimes
 from urllib.parse import parse_qs, urlparse
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-                               QLabel, QTextEdit, QPushButton, QComboBox, QCheckBox,
-                               QLineEdit, QFileDialog, QTableWidget, QTableWidgetItem,
-                               QHeaderView, QProgressBar, QMessageBox, QApplication, QScrollBar,
-                               QGridLayout, QMenu, QSystemTrayIcon, QStyle, QDialog, QFormLayout)
+                                QLabel, QTextEdit, QPushButton, QComboBox, QCheckBox,
+                                QLineEdit, QFileDialog, QTableWidget, QTableWidgetItem,
+                                QHeaderView, QProgressBar, QMessageBox, QApplication, QScrollBar,
+                                QGridLayout, QMenu, QSystemTrayIcon, QStyle, QDialog, QFormLayout,
+                                QSpinBox)
 from PySide6.QtCore import QThreadPool, Qt, QTimer
 from PySide6.QtGui import (QBrush, QColor, QIcon, QTextCharFormat, QTextCursor,
                            QKeySequence, QShortcut, QAction)
@@ -414,6 +415,20 @@ class MainWindow(QMainWindow):
         system_form.addRow(self.chk_confirm_exit)
         system_form.addRow(self.chk_restore_links)
 
+        system_form.addRow(QLabel("<b>Network</b>"))
+        self.spin_max_speed = QSpinBox()
+        self.spin_max_speed.setRange(0, 1000)
+        self.spin_max_speed.setSuffix(" MB/s")
+        self.spin_max_speed.setSpecialValueText("Unlimited")
+        self.spin_max_speed.setToolTip("Per-download bandwidth cap (0 = no limit)")
+        self.spin_max_speed.valueChanged.connect(lambda _: self.save_current_settings())
+        system_form.addRow("Speed limit:", self.spin_max_speed)
+
+        self.spin_video_threads = QSpinBox()
+        self.spin_video_threads.setRange(1, 8)
+        self.spin_video_threads.valueChanged.connect(self._on_concurrency_changed)
+        system_form.addRow("Video downloads:", self.spin_video_threads)
+
         sys_footer = QWidget()
         sys_footer_lay = QHBoxLayout(sys_footer)
         sys_footer_lay.setContentsMargins(0, 0, 0, 0)
@@ -540,6 +555,11 @@ class MainWindow(QMainWindow):
         self.settings.set("theme", display_name)
         self._apply_theme()
 
+    def _on_concurrency_changed(self, value: int):
+        """Applies the new video concurrency cap live and persists the choice."""
+        self.video_pool.setMaxThreadCount(value)
+        self.settings.set("max_video_downloads", value)
+
     def _refresh_checkbox_tokens(self):
         """Pushes the current theme tokens into every ThemedCheckBox."""
         tokens = get_active_tokens()
@@ -616,6 +636,14 @@ class MainWindow(QMainWindow):
             chk.setChecked(bool(self.settings.get(key, default)))
             chk.blockSignals(False)
 
+        self.spin_max_speed.blockSignals(True)
+        self.spin_max_speed.setValue(int(self.settings.get("max_speed_mb", 0)))
+        self.spin_max_speed.blockSignals(False)
+        self.spin_video_threads.blockSignals(True)
+        self.spin_video_threads.setValue(int(self.settings.get("max_video_downloads", 8)))
+        self.spin_video_threads.blockSignals(False)
+        self.video_pool.setMaxThreadCount(self.spin_video_threads.value())
+
     def save_current_settings(self):
         fmt = self.combo_format.currentText()
         current_q = self.combo_quality.currentText()
@@ -636,6 +664,8 @@ class MainWindow(QMainWindow):
         self.settings.set("confirm_exit_downloading", self.chk_confirm_exit.isChecked())
         self.settings.set("restore_links", self.chk_restore_links.isChecked())
         self.settings.set("expand_playlists", self.chk_expand_playlists.isChecked())
+        self.settings.set("max_speed_mb", self.spin_max_speed.value())
+        self.settings.set("max_video_downloads", self.spin_video_threads.value())
 
     def browse_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Download Folder", self.entry_path.text())
@@ -1196,7 +1226,8 @@ class MainWindow(QMainWindow):
             'quality': self.combo_quality.currentText(),
             'audio_boost': self.combo_boost.currentText(),
             'use_aria2': bool(self.settings.get("use_aria2", False)),
-            'queued_time': self.batch_start_time
+            'queued_time': self.batch_start_time,
+            'max_speed_mb': int(self.settings.get("max_speed_mb", 0)),
         }
 
         expand_on = self.chk_expand_playlists.isChecked()
