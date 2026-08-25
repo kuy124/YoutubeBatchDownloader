@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                                QGridLayout, QMenu, QSystemTrayIcon, QStyle, QDialog, QFormLayout)
 from PySide6.QtCore import QThreadPool, Qt, QTimer
 from PySide6.QtGui import (QBrush, QColor, QIcon, QTextCharFormat, QTextCursor,
-                           QKeySequence, QShortcut)
+                           QKeySequence, QShortcut, QAction)
 
 # Initial extraction overhead guess per task until real measurements arrive
 DEFAULT_EXTRACTION_SECONDS = 2.5
@@ -341,33 +341,66 @@ class MainWindow(QMainWindow):
         ])
         options_form.addRow("Audio Boost:", self.combo_boost)
 
-        # Behavior toggles
-        options_form.addRow(QLabel("<b>Behavior</b>"))
-        self.chk_auto_clear = QCheckBox("Automatically clear completed downloads (after 2 seconds)")
-        self.chk_monitor_clip = QCheckBox("Auto-Add links from Clipboard (Real-time Monitor)")
-        options_form.addRow(self.chk_auto_clear)
-        options_form.addRow(self.chk_monitor_clip)
-
-        # Footer: theme switcher + update check live here instead of the main page
+        # Footer
         footer_row = QWidget()
         footer_lay = QHBoxLayout(footer_row)
         footer_lay.setContentsMargins(0, 0, 0, 0)
-        footer_lay.addWidget(QLabel("Theme:"))
+        footer_lay.addStretch()
+        btn_close_options = QPushButton("Close")
+        btn_close_options.clicked.connect(self.options_dialog.close)
+        footer_lay.addWidget(btn_close_options)
+        options_form.addRow(footer_row)
+
+        # ---------------- System Preferences Dialog ----------------
+        # Appearance + app behavior live apart from conversion settings on purpose
+        self.system_dialog = QDialog(self)
+        self.system_dialog.setWindowTitle("System Preferences")
+        system_form = QFormLayout(self.system_dialog)
+        system_form.setLabelAlignment(Qt.AlignRight)
+        system_form.setHorizontalSpacing(14)
+
+        system_form.addRow(QLabel("<b>Appearance</b>"))
+        theme_row = QWidget()
+        theme_lay = QHBoxLayout(theme_row)
+        theme_lay.setContentsMargins(0, 0, 0, 0)
         self.combo_theme = QComboBox()
         self.combo_theme.addItems(THEMES)
         saved_theme = self.settings.get("theme", "Dark")
         theme_idx = self.combo_theme.findText(saved_theme if saved_theme in THEMES else "Dark")
         self.combo_theme.setCurrentIndex(theme_idx if theme_idx != -1 else 0)
         self.combo_theme.currentTextChanged.connect(self._change_theme)
-        footer_lay.addWidget(self.combo_theme)
-        footer_lay.addStretch()
+        theme_lay.addWidget(self.combo_theme)
+        theme_lay.addStretch()
+        system_form.addRow("Theme:", theme_row)
+
+        system_form.addRow(QLabel("<b>Behavior</b>"))
+        self.chk_auto_clear = QCheckBox("Automatically clear completed downloads (after 2 seconds)")
+        self.chk_monitor_clip = QCheckBox("Auto-Add links from Clipboard (Real-time Monitor)")
+        system_form.addRow(self.chk_auto_clear)
+        system_form.addRow(self.chk_monitor_clip)
+
+        sys_footer = QWidget()
+        sys_footer_lay = QHBoxLayout(sys_footer)
+        sys_footer_lay.setContentsMargins(0, 0, 0, 0)
         btn_check_update = QPushButton("Check for Updates")
         btn_check_update.clicked.connect(lambda: self.check_for_updates(manual=True))
-        btn_close_options = QPushButton("Close")
-        btn_close_options.clicked.connect(self.options_dialog.close)
-        footer_lay.addWidget(btn_check_update)
-        footer_lay.addWidget(btn_close_options)
-        options_form.addRow(footer_row)
+        btn_close_system = QPushButton("Close")
+        btn_close_system.clicked.connect(self.system_dialog.close)
+        sys_footer_lay.addStretch()
+        sys_footer_lay.addWidget(btn_check_update)
+        sys_footer_lay.addWidget(btn_close_system)
+        system_form.addRow(sys_footer)
+
+        # ---------------- Menu Bar ----------------
+        menu_bar = self.menuBar()
+        settings_menu = menu_bar.addMenu("&Settings")
+        act_download_opts = settings_menu.addAction("Download &Options…")
+        act_download_opts.triggered.connect(self.open_download_options)
+        act_system_prefs = settings_menu.addAction("&System Preferences…")
+        act_system_prefs.triggered.connect(self.open_system_preferences)
+        help_menu = menu_bar.addMenu("&Help")
+        act_updates = help_menu.addAction("Check for &Updates")
+        act_updates.triggered.connect(lambda: self.check_for_updates(manual=True))
 
         # Keep the main-page chip in sync with every option change
         self.combo_format.currentTextChanged.connect(lambda _: self._update_options_chip_text())
@@ -500,6 +533,10 @@ class MainWindow(QMainWindow):
     def open_download_options(self):
         """Shows the consolidated download options dialog."""
         self.options_dialog.exec()
+
+    def open_system_preferences(self):
+        """Shows the system preferences dialog (appearance, behavior, updates)."""
+        self.system_dialog.exec()
 
     def _update_options_chip_text(self):
         """Summarizes the current conversion choices onto the main-page chip."""
