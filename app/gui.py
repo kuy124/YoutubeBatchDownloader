@@ -361,6 +361,10 @@ class MainWindow(QMainWindow):
         ])
         options_form.addRow("Audio Boost:", self.combo_boost)
 
+        self.chk_expand_playlists = ThemedCheckBox("Expand playlists into individual downloads")
+        self.chk_expand_playlists.setToolTip("When enabled, pasting a playlist URL will expand it\ninto separate queued rows (numbered 01, 02, ...)")
+        options_form.addRow(self.chk_expand_playlists)
+
         # Footer
         footer_row = QWidget()
         footer_lay = QHBoxLayout(footer_row)
@@ -538,7 +542,8 @@ class MainWindow(QMainWindow):
         tokens = get_active_tokens()
         for chk in (self.chk_auto_clear, self.chk_monitor_clip,
                     self.chk_completion_sound, self.chk_batch_notify,
-                    self.chk_confirm_exit, self.chk_restore_links):
+                    self.chk_confirm_exit, self.chk_restore_links,
+                    self.chk_expand_playlists):
             chk.set_tokens(tokens)
 
     def on_format_changed(self, format_name: str):
@@ -602,6 +607,7 @@ class MainWindow(QMainWindow):
             (self.chk_batch_notify, "batch_notifications", True),
             (self.chk_confirm_exit, "confirm_exit_downloading", True),
             (self.chk_restore_links, "restore_links", False),
+            (self.chk_expand_playlists, "expand_playlists", False),
         ):
             chk.blockSignals(True)
             chk.setChecked(bool(self.settings.get(key, default)))
@@ -626,6 +632,7 @@ class MainWindow(QMainWindow):
         self.settings.set("batch_notifications", self.chk_batch_notify.isChecked())
         self.settings.set("confirm_exit_downloading", self.chk_confirm_exit.isChecked())
         self.settings.set("restore_links", self.chk_restore_links.isChecked())
+        self.settings.set("expand_playlists", self.chk_expand_playlists.isChecked())
 
     def browse_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Download Folder", self.entry_path.text())
