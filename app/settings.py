@@ -18,6 +18,7 @@ class Settings:
             "audio_boost": "100% (Original)",
             "auto_clear": False,
             "monitor_clipboard": False,
+            "theme": "Dark",
             "use_aria2": False,
             "threads": max(12, (os.cpu_count() or 4) * 2)
         }

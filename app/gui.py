@@ -27,6 +27,7 @@ MAX_AUDIO_DOWNLOADS = min(max(os.cpu_count() or 4, 4), 16)
 from .settings import Settings
 from .downloader import DownloadWorker, TitlePreviewWorker
 from .logger import log
+from .themes import THEMES, build_theme
 from .updater import APP_VERSION, UpdateWorker
 from .utils import extract_http_links, format_elapsed_words, format_hms, get_icon_path, is_youtube_url
 from .widgets import DesktopToast
@@ -347,15 +348,23 @@ class MainWindow(QMainWindow):
         options_form.addRow(self.chk_auto_clear)
         options_form.addRow(self.chk_monitor_clip)
 
-        # Footer: update check lives here instead of cluttering the main page
+        # Footer: theme switcher + update check live here instead of the main page
         footer_row = QWidget()
         footer_lay = QHBoxLayout(footer_row)
         footer_lay.setContentsMargins(0, 0, 0, 0)
+        footer_lay.addWidget(QLabel("Theme:"))
+        self.combo_theme = QComboBox()
+        self.combo_theme.addItems(THEMES)
+        saved_theme = self.settings.get("theme", "Dark")
+        theme_idx = self.combo_theme.findText(saved_theme if saved_theme in THEMES else "Dark")
+        self.combo_theme.setCurrentIndex(theme_idx if theme_idx != -1 else 0)
+        self.combo_theme.currentTextChanged.connect(self._change_theme)
+        footer_lay.addWidget(self.combo_theme)
+        footer_lay.addStretch()
         btn_check_update = QPushButton("Check for Updates")
         btn_check_update.clicked.connect(lambda: self.check_for_updates(manual=True))
         btn_close_options = QPushButton("Close")
         btn_close_options.clicked.connect(self.options_dialog.close)
-        footer_lay.addStretch()
         footer_lay.addWidget(btn_check_update)
         footer_lay.addWidget(btn_close_options)
         options_form.addRow(footer_row)
@@ -441,107 +450,30 @@ class MainWindow(QMainWindow):
 
         # ---------------- Universal Loading Bar ----------------
         self.global_progress = QProgressBar()
+        self.global_progress.setObjectName("globalProgress")
         self.global_progress.setValue(0)
         self.global_progress.setFixedHeight(20)
         self.global_progress.setFormat("No active tasks")
         self.global_progress.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.global_progress.setStyleSheet("""
-            QProgressBar {
-                border: 1px solid #bbb;
-                border-radius: 4px;
-                text-align: center;
-                font-weight: bold;
-                background-color: #f5f5f5;
-                color: #1a237e; /* Royal Indigo Loading Text Color */
-            }
-            QProgressBar::chunk {
-                background-color: #0288d1;
-                border-radius: 3px;
-            }
-        """)
         layout.addWidget(self.global_progress)
 
         # ---------------- Bottom Status Bar ----------------
-        self._apply_minimal_theme()
+        self._apply_theme()
         self.statusBar = self.statusBar()
         self.update_status_summary()
 
-    def _apply_minimal_theme(self):
-        """One cohesive minimalist stylesheet; button variants use dynamic properties."""
-        self.setStyleSheet("""
-            MainWindow, QDialog {
-                background-color: #fafafa;
-            }
-            QLabel { color: #37474f; }
+    def _apply_theme(self):
+        """Applies the persisted theme (Dark default) as QSS + application palette."""
+        theme_name = self.settings.get("theme", "Dark")
+        qss, palette = build_theme(theme_name)
+        QApplication.instance().setPalette(palette)
+        self.setStyleSheet(qss)
+        self._current_theme = "Light" if isinstance(theme_name, str) and theme_name.strip().lower() == "light" else "Dark"
 
-            QPushButton {
-                background-color: #ffffff;
-                border: 1px solid #cfd8dc;
-                border-radius: 4px;
-                padding: 7px 16px;
-                color: #37474f;
-                font-weight: 600;
-            }
-            QPushButton:hover { background-color: #eceff1; border-color: #b0bec5; }
-            QPushButton:pressed { background-color: #cfd8dc; }
-            QPushButton:focus { border-color: #64b5f6; }
-
-            QPushButton[variant="primary"] {
-                background-color: #1976d2; color: #ffffff;
-                border: 1px solid #1976d2; padding: 9px 20px; font-weight: 700;
-            }
-            QPushButton[variant="primary"]:hover { background-color: #1565c0; }
-            QPushButton[variant="primary"]:pressed { background-color: #0d47a1; }
-
-            QPushButton[variant="danger"] {
-                background-color: #ffffff; color: #c62828;
-                border: 1px solid #ef9a9a; padding: 9px 16px; font-weight: 700;
-            }
-            QPushButton[variant="danger"]:hover { background-color: #ffebee; }
-
-            QPushButton[variant="chip"] {
-                background-color: #ffffff; color: #37474f;
-                border: 1px solid #b0bec5; padding: 9px 16px; font-weight: 700;
-            }
-            QPushButton[variant="chip"]:hover { background-color: #eceff1; }
-
-            QPushButton[variant="cell"] {
-                padding: 3px 12px; font-weight: 500; border-radius: 3px;
-            }
-            QPushButton[variant="cell-primary"] {
-                background-color: #0288d1; color: #ffffff;
-                border: 1px solid #0288d1; padding: 4px 14px; font-weight: 600; border-radius: 3px;
-            }
-            QPushButton[variant="cell-primary"]:hover { background-color: #0277bd; }
-            QPushButton[variant="cell-danger"] {
-                background-color: #ffffff; color: #c62828;
-                border: 1px solid #ef9a9a; padding: 4px 14px; font-weight: 600; border-radius: 3px;
-            }
-            QPushButton[variant="cell-danger"]:hover { background-color: #ffebee; }
-
-            QLineEdit, QComboBox {
-                background-color: #ffffff;
-                border: 1px solid #cfd8dc;
-                border-radius: 4px;
-                padding: 5px 8px;
-                color: #37474f;
-            }
-            QLineEdit:focus, QComboBox:focus { border-color: #64b5f6; }
-
-            QTableWidget {
-                gridline-color: #eceff1;
-                selection-background-color: #e3f2fd;
-                selection-color: #37474f;
-            }
-            QHeaderView::section {
-                background-color: #f5f5f5;
-                border: none;
-                border-bottom: 1px solid #cfd8dc;
-                padding: 6px 8px;
-                color: #607d8b;
-                font-weight: 600;
-            }
-        """)
+    def _change_theme(self, display_name: str):
+        """Persists and live-applies a theme chosen in the options dialog."""
+        self.settings.set("theme", display_name)
+        self._apply_theme()
 
     def on_format_changed(self, format_name: str):
         """Dynamically toggles quality dropdown between Video Resolutions and Audio Bitrates."""
