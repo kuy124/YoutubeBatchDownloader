@@ -3,30 +3,40 @@ import uuid
 import time
 import webbrowser
 import winsound  # Standard library module to trigger clean system chimes
-from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-                               QLabel, QTextEdit, QPushButton, QComboBox, QCheckBox, 
-                               QLineEdit, QFileDialog, QTableWidget, QTableWidgetItem, 
-                               QHeaderView, QProgressBar, QMessageBox, QApplication, QScrollBar, QGridLayout)
+from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+                               QLabel, QTextEdit, QPushButton, QComboBox, QCheckBox,
+                               QLineEdit, QFileDialog, QTableWidget, QTableWidgetItem,
+                               QHeaderView, QProgressBar, QMessageBox, QApplication, QScrollBar,
+                               QGridLayout, QMenu, QSystemTrayIcon, QStyle, QDialog, QFormLayout)
 from PySide6.QtCore import QThreadPool, Qt, QTimer
-from PySide6.QtGui import QBrush, QColor, QIcon, QTextCharFormat, QTextCursor
+from PySide6.QtGui import (QBrush, QColor, QIcon, QTextCharFormat, QTextCursor,
+                           QKeySequence, QShortcut)
 
 # Initial extraction overhead guess per task until real measurements arrive
 DEFAULT_EXTRACTION_SECONDS = 2.5
 # Rolling window size of measured extraction durations kept for averaging
 EXTRACTION_SAMPLE_WINDOW = 20
+# Simultaneous video downloads. Each progressive download is one HTTP
+# connection (~5-8 MB/s each), so this cap directly bounds aggregate
+# bandwidth; 8 lets fast lines saturate without spamming YouTube
+MAX_VIDEO_DOWNLOADS = 8
+# Audio tracks are tiny on bandwidth but each spawns a one-core FFmpeg MP3
+# conversion, so a wide pool converts whole batches across every CPU core
+MAX_AUDIO_DOWNLOADS = min(max(os.cpu_count() or 4, 4), 16)
 
 from .settings import Settings
 from .downloader import DownloadWorker, TitlePreviewWorker
 from .logger import log
 from .updater import APP_VERSION, UpdateWorker
-from .utils import format_elapsed_words, format_hms, get_icon_path
+from .utils import extract_http_links, format_elapsed_words, format_hms, get_icon_path, is_youtube_url
 from .widgets import DesktopToast
+from .win_taskbar import WinTaskbarProgress
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("YouTube Batch Downloader")
-        self.resize(950, 640)
+        self.resize(950, 600)
         self.settings = Settings()
         
         # Load and set Window Icon
@@ -38,6 +48,13 @@ class MainWindow(QMainWindow):
         # Max out parallel thread pool across all CPU logical cores
         max_threads = max(12, (os.cpu_count() or 4) * 2)
         self.threadpool.setMaxThreadCount(max_threads)
+
+        # Dedicated pools: videos share limited bandwidth so stay tightly capped,
+        # while audio tasks parallelize their CPU-bound conversions across cores
+        self.video_pool = QThreadPool()
+        self.video_pool.setMaxThreadCount(MAX_VIDEO_DOWNLOADS)
+        self.audio_pool = QThreadPool()
+        self.audio_pool.setMaxThreadCount(MAX_AUDIO_DOWNLOADS)
         
         self.active_workers = {}
         self.row_mapping = {}
@@ -51,9 +68,33 @@ class MainWindow(QMainWindow):
         self.preview_timer.setSingleShot(True)
         self.preview_timer.timeout.connect(self.fetch_title_previews)
 
+        # Coalesces O(all-rows) aggregate recalcs (status bar, global %) into one tick
+        self.ui_refresh_timer = QTimer()
+        self.ui_refresh_timer.setSingleShot(True)
+        self.ui_refresh_timer.setInterval(250)
+        self.ui_refresh_timer.timeout.connect(self.refresh_aggregates)
+
+        # Remembers the last text previews were fetched for, to skip redundant refetches
+        self._last_preview_text = ""
+
         self.setup_ui()
         self.desktop_toast = DesktopToast()
         self.apply_settings()
+
+        # Windows taskbar progress overlay + completion tray notifications
+        self.taskbar = WinTaskbarProgress()
+        self.taskbar.attach(self)
+        tray_icon_source = self.windowIcon()
+        if tray_icon_source.isNull():
+            tray_icon_source = self.style().standardIcon(QStyle.SP_ComputerIcon)
+        self.tray_icon = QSystemTrayIcon(tray_icon_source, self)
+
+        # Debounced clipboard monitor: coalesces rapid copies into one quiet batch add
+        self.clipboard_timer = QTimer()
+        self.clipboard_timer.setSingleShot(True)
+        self.clipboard_timer.setInterval(400)
+        self.clipboard_timer.timeout.connect(self.process_clipboard_batch)
+        self._last_clipboard_text = None
 
         # Connect the OS clipboard monitor signal
         self.clipboard = QApplication.clipboard()
@@ -63,6 +104,11 @@ class MainWindow(QMainWindow):
         # Trigger silent update check on startup
         QTimer.singleShot(1000, lambda: self.check_for_updates(manual=False))
 
+        # Pre-fill any YouTube links already sitting on the clipboard; deferred so
+        # the window paints instantly instead of waiting on a possibly slow/locked
+        # OS clipboard read during startup.
+        QTimer.singleShot(150, self.prefill_from_clipboard)
+
     def on_monitor_toggled(self, checked: bool):
         if checked:
             self.desktop_toast.show_notification(
@@ -71,6 +117,20 @@ class MainWindow(QMainWindow):
                 2500
             )
         self.save_current_settings()
+
+    def closeEvent(self, event):
+        """Drains background pools so interpreter shutdown never races live worker
+        threads (prevents 'can't register atexit after shutdown' tracebacks)."""
+        self.preview_timer.stop()
+        self.clipboard_timer.stop()
+        self.ui_refresh_timer.stop()
+        self.threadpool.clear()
+        self.video_pool.clear()
+        self.audio_pool.clear()
+        self.threadpool.waitForDone(2000)
+        self.video_pool.waitForDone(2000)
+        self.audio_pool.waitForDone(2000)
+        super().closeEvent(event)
 
     def check_for_updates(self, manual: bool = False):
         worker = UpdateWorker(APP_VERSION, manual=manual)
@@ -117,18 +177,10 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(main_widget)
         layout = QVBoxLayout(main_widget)
 
-        # ---------------- URL Input Search & Title Preview Area ----------------
-        input_search_layout = QHBoxLayout()
-        input_search_layout.addWidget(QLabel("Search Input:"))
-        self.search_url_input = QLineEdit()
-        self.search_url_input.setPlaceholderText("Filter pasted URLs or titles...")
-        self.search_url_input.textChanged.connect(self.search_input_textboxes)
-        input_search_layout.addWidget(self.search_url_input)
+        # Accept URL/text drops anywhere on the window
+        self.setAcceptDrops(True)
 
-        self.lbl_url_matches = QLabel("")
-        input_search_layout.addWidget(self.lbl_url_matches)
-        layout.addLayout(input_search_layout)
-
+        # ---------------- URL Input & Title Preview Area ----------------
         input_grid = QGridLayout()
         
         # Row 0: Headers
@@ -143,7 +195,10 @@ class MainWindow(QMainWindow):
         self.url_input.setLineWrapMode(QTextEdit.NoWrap)
         self.url_input.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.url_input.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.url_input.setPlaceholderText("https://www.youtube.com/watch?v=...\nhttps://www.youtube.com/watch?v=...")
+        self.url_input.setPlaceholderText(
+            "https://www.youtube.com/watch?v=...\nhttps://www.youtube.com/watch?v=...\n\n"
+            "Tip: Drop or paste links anywhere, then press Ctrl+Enter."
+        )
         self.url_input.textChanged.connect(self.on_url_input_changed)
         input_grid.addWidget(self.url_input, 1, 0)
         
@@ -207,14 +262,37 @@ class MainWindow(QMainWindow):
         url_btn_layout.addWidget(btn_paste)
         url_btn_layout.addWidget(btn_clear)
         url_btn_layout.addStretch()
+
+        # Compact "find inside pasted list" moved onto this row to save a full row
+        url_btn_layout.addWidget(QLabel("Find:"))
+        self.search_url_input = QLineEdit()
+        self.search_url_input.setPlaceholderText("Highlight in URLs...")
+        self.search_url_input.setMaximumWidth(220)
+        self.search_url_input.textChanged.connect(self.search_input_textboxes)
+        url_btn_layout.addWidget(self.search_url_input)
+
+        self.lbl_url_matches = QLabel("")
+        url_btn_layout.addWidget(self.lbl_url_matches)
         layout.addLayout(url_btn_layout)
 
-        # ---------------- Options Area ----------------
-        options_layout = QHBoxLayout()
-        
+        # ---------------- Download Options Dialog ----------------
+        # Every conversion choice lives behind one compact chip on the main page
+        self.video_qualities = ["Best", "4K (2160p)", "1440p (2K)", "1080p", "720p", "480p"]
+        self.audio_qualities = [
+            "320 kbps (Extreme)",
+            "256 kbps (Very High)",
+            "192 kbps (High / Standard)",
+            "128 kbps (Medium)",
+            "96 kbps (Low / Small Size)"
+        ]
+
+        self.options_dialog = QDialog(self)
+        self.options_dialog.setWindowTitle("Download Options")
+        options_form = QFormLayout(self.options_dialog)
+        options_form.setLabelAlignment(Qt.AlignRight)
+        options_form.setHorizontalSpacing(14)
+
         # Formats
-        opt_v_layout = QVBoxLayout()
-        opt_v_layout.addWidget(QLabel("Format:"))
         self.combo_format = QComboBox()
         self.combo_format.addItems([
             "Best Quality (MKV)",
@@ -229,35 +307,25 @@ class MainWindow(QMainWindow):
             "AAC Audio",
             "OPUS Audio"
         ])
-        opt_v_layout.addWidget(self.combo_format)
-        options_layout.addLayout(opt_v_layout)
-
-        # Quality Presets
-        self.video_qualities = ["Best", "4K (2160p)", "1440p (2K)", "1080p", "720p", "480p"]
-        self.audio_qualities = [
-            "320 kbps (Extreme)",
-            "256 kbps (Very High)",
-            "192 kbps (High / Standard)",
-            "128 kbps (Medium)",
-            "96 kbps (Low / Small Size)"
-        ]
+        options_form.addRow("Format:", self.combo_format)
 
         # Quality (Dynamic Label & Items)
-        opt_q_layout = QVBoxLayout()
+        quality_row = QWidget()
+        quality_lay = QHBoxLayout(quality_row)
+        quality_lay.setContentsMargins(0, 0, 0, 0)
         self.lbl_quality = QLabel("Max Resolution:")
         self.combo_quality = QComboBox()
         self.combo_quality.addItems(self.video_qualities)
-        opt_q_layout.addWidget(self.lbl_quality)
-        opt_q_layout.addWidget(self.combo_quality)
-        options_layout.addLayout(opt_q_layout)
+        quality_lay.addWidget(self.lbl_quality)
+        quality_lay.addWidget(self.combo_quality)
+        quality_lay.addStretch()
+        options_form.addRow("Quality:", quality_row)
 
         # Switch quality options dynamically when format changes
         self.combo_format.currentTextChanged.connect(self.on_format_changed)
         self.combo_quality.currentTextChanged.connect(lambda: self.save_current_settings())
 
         # Audio Boost
-        opt_b_layout = QVBoxLayout()
-        opt_b_layout.addWidget(QLabel("Audio Boost:"))
         self.combo_boost = QComboBox()
         self.combo_boost.addItems([
             "100% (Original)",
@@ -268,18 +336,32 @@ class MainWindow(QMainWindow):
             "250% (+8 dB)",
             "300% (+9.5 dB)"
         ])
-        opt_b_layout.addWidget(self.combo_boost)
-        options_layout.addLayout(opt_b_layout)
+        options_form.addRow("Audio Boost:", self.combo_boost)
 
-        # Checkboxes Settings Block
-        check_layout = QVBoxLayout()
+        # Behavior toggles
+        options_form.addRow(QLabel("<b>Behavior</b>"))
         self.chk_auto_clear = QCheckBox("Automatically clear completed downloads (after 2 seconds)")
         self.chk_monitor_clip = QCheckBox("Auto-Add links from Clipboard (Real-time Monitor)")
-        check_layout.addWidget(self.chk_auto_clear)
-        check_layout.addWidget(self.chk_monitor_clip)
-        options_layout.addLayout(check_layout)
-        
-        layout.addLayout(options_layout)
+        options_form.addRow(self.chk_auto_clear)
+        options_form.addRow(self.chk_monitor_clip)
+
+        # Footer: update check lives here instead of cluttering the main page
+        footer_row = QWidget()
+        footer_lay = QHBoxLayout(footer_row)
+        footer_lay.setContentsMargins(0, 0, 0, 0)
+        btn_check_update = QPushButton("Check for Updates")
+        btn_check_update.clicked.connect(lambda: self.check_for_updates(manual=True))
+        btn_close_options = QPushButton("Close")
+        btn_close_options.clicked.connect(self.options_dialog.close)
+        footer_lay.addStretch()
+        footer_lay.addWidget(btn_check_update)
+        footer_lay.addWidget(btn_close_options)
+        options_form.addRow(footer_row)
+
+        # Keep the main-page chip in sync with every option change
+        self.combo_format.currentTextChanged.connect(lambda _: self._update_options_chip_text())
+        self.combo_quality.currentTextChanged.connect(lambda _: self._update_options_chip_text())
+        self.combo_boost.currentTextChanged.connect(lambda _: self._update_options_chip_text())
 
         # ---------------- Download Path ----------------
         path_layout = QHBoxLayout()
@@ -298,8 +380,23 @@ class MainWindow(QMainWindow):
         
         layout.addLayout(path_layout)
 
-        # ---------------- Action Buttons ----------------
+        # ---------------- Main Action Bar ----------------
         action_layout = QHBoxLayout()
+
+        # Single compact chip summarizing current conversion choices
+        self.btn_options = QPushButton()
+        self.btn_options.setCursor(Qt.PointingHandCursor)
+        self.btn_options.setStyleSheet(
+            "QPushButton { background-color: #eceff1; border: 1px solid #b0bec5;"
+            " border-radius: 4px; padding: 9px 14px; font-weight: bold; color: #37474f; }"
+            "QPushButton:hover { background-color: #cfd8dc; }"
+        )
+        self.btn_options.clicked.connect(self.open_download_options)
+        self._update_options_chip_text()
+        action_layout.addWidget(self.btn_options)
+
+        action_layout.addStretch()
+
         btn_download = QPushButton("Add to Queue and Download")
         btn_download.setMinimumHeight(38)
         btn_download.setStyleSheet("background-color: #1976d2; color: white; font-weight: bold; border-radius: 3px;")
@@ -317,12 +414,12 @@ class MainWindow(QMainWindow):
         btn_clear_completed.clicked.connect(self.clear_completed_tasks)
         action_layout.addWidget(btn_clear_completed)
 
-        btn_check_update = QPushButton("Check Updates")
-        btn_check_update.setMinimumHeight(38)
-        btn_check_update.clicked.connect(lambda: self.check_for_updates(manual=True))
-        action_layout.addWidget(btn_check_update)
-        
         layout.addLayout(action_layout)
+
+        # Keyboard shortcut: Ctrl+Enter / Ctrl+Return starts the queue instantly
+        for seq in ("Ctrl+Return", "Ctrl+Enter"):
+            start_shortcut = QShortcut(QKeySequence(seq), self)
+            start_shortcut.activated.connect(self.start_downloads)
 
         # ---------------- Search Bar & Queue Table ----------------
         search_layout = QHBoxLayout()
@@ -340,6 +437,11 @@ class MainWindow(QMainWindow):
         
         # Connect double-click on cells to run instant playback
         self.table.cellDoubleClicked.connect(self.on_table_double_clicked)
+
+        # Right-click context menu per row (retry, copy URL, open folder, remove...)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.show_row_context_menu)
+
         layout.addWidget(self.table)
 
         # ---------------- Universal Loading Bar ----------------
@@ -385,8 +487,30 @@ class MainWindow(QMainWindow):
             saved_video_q = self.settings.get("video_quality", "Best")
             idx = self.combo_quality.findText(saved_video_q)
             self.combo_quality.setCurrentIndex(idx if idx != -1 else 0)
-            
+
         self.combo_quality.blockSignals(False)
+        # Quality label + items just changed; refresh the main-page chip too
+        self._update_options_chip_text()
+
+    def open_download_options(self):
+        """Shows the consolidated download options dialog."""
+        self.options_dialog.exec()
+
+    def _update_options_chip_text(self):
+        """Summarizes the current conversion choices onto the main-page chip."""
+        fmt = self.combo_format.currentText()
+        qual = self.combo_quality.currentText()
+        boost_pct = self.combo_boost.currentText().split(' ')[0]
+
+        short_fmt = fmt.replace(' Video', '').replace(' Audio', '')
+        text = f"⚙  {short_fmt} · {qual}"
+        if not boost_pct.startswith('100'):
+            text += f" · Boost {boost_pct}"
+        self.btn_options.setText(text)
+        self.btn_options.setToolTip(
+            f"Format: {fmt}\nQuality: {qual}\nAudio Boost: {self.combo_boost.currentText()}\n\n"
+            f"Click to change download options"
+        )
 
     def apply_settings(self):
         self.entry_path.setText(self.settings.get("download_path"))
@@ -394,8 +518,13 @@ class MainWindow(QMainWindow):
         self.combo_format.setCurrentText(saved_format)
         self.on_format_changed(saved_format)
         self.combo_boost.setCurrentText(self.settings.get("audio_boost", "100% (Original)"))
-        self.chk_auto_clear.setChecked(self.settings.get("auto_clear"))
-        self.chk_monitor_clip.setChecked(self.settings.get("monitor_clipboard"))
+        # blockSignals prevents the "Monitor Active" toast + settings save from
+        # firing as a spurious side effect of restoring checkboxes at startup
+        for chk, value in ((self.chk_auto_clear, self.settings.get("auto_clear")),
+                           (self.chk_monitor_clip, self.settings.get("monitor_clipboard"))):
+            chk.blockSignals(True)
+            chk.setChecked(value)
+            chk.blockSignals(False)
 
     def save_current_settings(self):
         fmt = self.combo_format.currentText()
@@ -443,27 +572,67 @@ class MainWindow(QMainWindow):
             pass
 
     def on_clipboard_changed(self):
-        """Appends copied YouTube links directly to textbox if monitor is checked."""
+        """Debounce trigger: batches rapid clipboard copies into a single add."""
         if not self.chk_monitor_clip.isChecked():
             return
-        text = self.clipboard.text().strip()
-        if "youtube.com/" in text or "youtu.be/" in text:
-            current_text = self.url_input.toPlainText()
-            # Ensure we do not add duplicate spam links already sitting in the box
-            if text not in current_text:
-                if current_text:
-                    self.url_input.append(text)
-                else:
-                    self.url_input.setPlainText(text)
-                log.info(f"Clipboard Monitor dynamically added link: {text}")
-                
-                # Pop up directly on the Windows desktop (bottom-right above taskbar)
-                display_url = text if len(text) <= 48 else text[:45] + "..."
-                self.desktop_toast.show_notification(
-                    "✓ YouTube Link Added to Queue",
-                    display_url,
-                    2800
-                )
+        self.clipboard_timer.start()
+
+    def process_clipboard_batch(self):
+        """Adds any NEW YouTube links found on the clipboard in one quiet batch."""
+        if not self.chk_monitor_clip.isChecked():
+            return
+        try:
+            text = self.clipboard.text() or ""
+        except Exception:
+            # Clipboard momentarily locked by another app; skip this tick silently
+            return
+
+        if not text or text == self._last_clipboard_text:
+            return
+        self._last_clipboard_text = text
+
+        links = [l for l in extract_http_links(text) if is_youtube_url(l)]
+        current_lines = [l.strip() for l in self.url_input.toPlainText().split('\n') if l.strip()]
+        known = set(current_lines)
+        added = []
+        for link in links:
+            if link not in known:
+                known.add(link)
+                added.append(link)
+
+        if not added:
+            return
+
+        self.url_input.setPlainText("\n".join(current_lines + added))
+        log.info(f"Clipboard Monitor batch-added {len(added)} link(s)")
+
+        display = added[0] if len(added) == 1 else f"{added[0][:42]}..."
+        self.desktop_toast.show_notification(
+            "✓ YouTube Link Added to Queue" if len(added) == 1 else f"✓ {len(added)} Links Added",
+            display,
+            2800
+        )
+
+    def prefill_from_clipboard(self):
+        """Loads any YouTube links already on the clipboard straight into the input."""
+        if self.url_input.toPlainText().strip():
+            return
+        try:
+            text = self.clipboard.text() or ""
+        except Exception:
+            return
+        # Remember it so the live monitor never re-adds/re-toasts this same text
+        self._last_clipboard_text = text
+        links = [l for l in extract_http_links(text) if is_youtube_url(l)]
+        links = list(dict.fromkeys(links))
+        if not links:
+            return
+        self.url_input.setPlainText("\n".join(links))
+        self.desktop_toast.show_notification(
+            "✓ Clipboard Loaded",
+            f"{len(links)} YouTube link{'s' if len(links) != 1 else ''} ready — Ctrl+Enter to download",
+            3200
+        )
 
     def on_table_double_clicked(self, row, column):
         """Allows double-clicking any complete row to play the downloaded file."""
@@ -473,6 +642,94 @@ class MainWindow(QMainWindow):
             file_path = self.completed_paths.get(task_id)
             if file_path:
                 self.open_file(file_path)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls() or event.mimeData().hasText():
+            event.acceptProposedAction()
+
+    def dragMoveEvent(self, event):
+        event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        """Accepts dropped text or URL objects and appends new links to the input."""
+        mime = event.mimeData()
+        candidates = []
+        if mime.hasUrls():
+            candidates.extend(url.toString() for url in mime.urls())
+        if mime.hasText():
+            candidates.append(mime.text())
+
+        links = extract_http_links("\n".join(candidates))
+
+        current_lines = [l.strip() for l in self.url_input.toPlainText().split('\n') if l.strip()]
+        known = set(current_lines)
+        added = []
+        for link in links:
+            if link not in known:
+                known.add(link)
+                added.append(link)
+
+        if added:
+            self.url_input.setPlainText("\n".join(current_lines + added))
+            self.desktop_toast.show_notification(
+                "✓ Links Added",
+                f"{len(added)} link{'s' if len(added) != 1 else ''} appended — press Ctrl+Enter to download",
+                2800
+            )
+        event.acceptProposedAction()
+
+    def show_row_context_menu(self, pos):
+        """Right-click menu for queue rows: open, copy URL, retry, cancel, remove."""
+        row = self.table.rowAt(pos.y())
+        if row < 0:
+            return
+        task_id = self._row_to_task_id(row)
+        if not task_id:
+            return
+
+        status_item = self.table.item(row, 1)
+        status_text = status_item.text() if status_item else ""
+        file_path = self.completed_paths.get(task_id)
+
+        menu = QMenu(self)
+        act_open = act_folder = None
+        if file_path and os.path.exists(file_path):
+            act_open = menu.addAction("Open File")
+            act_folder = menu.addAction("Open Containing Folder")
+            menu.addSeparator()
+
+        act_copy = menu.addAction("Copy URL")
+        act_retry = act_cancel = None
+        if status_text == "Complete":
+            pass
+        elif "Failed" in status_text:
+            act_retry = menu.addAction("Retry Download")
+        else:
+            act_cancel = menu.addAction("Cancel Download")
+        menu.addSeparator()
+        act_remove = menu.addAction("Remove From List")
+
+        chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if chosen is None:
+            return
+        if chosen == act_open:
+            self.open_file(file_path)
+        elif chosen == act_folder:
+            folder = os.path.dirname(file_path)
+            if os.path.isdir(folder):
+                os.startfile(folder)
+        elif chosen == act_copy:
+            url = self.task_data.get(task_id, {}).get('url', '')
+            QApplication.clipboard().setText(url)
+        elif chosen == act_retry:
+            self.retry_task(task_id)
+        elif chosen == act_cancel:
+            self.cancel_task(task_id)
+        elif chosen == act_remove:
+            worker = self.active_workers.get(task_id)
+            if worker:
+                worker.cancel()
+            self.remove_task_row(task_id)
 
     def update_global_progress(self):
         """Calculates and updates the average progress across the entire active queue."""
@@ -497,7 +754,7 @@ class MainWindow(QMainWindow):
         raw_lines = self.url_input.toPlainText().split('\n')
         valid_links = [line for line in raw_lines if line.strip()]
         self.lbl_url_header.setText(f"<b>URLs (One per line) [{len(valid_links)} links]:</b>")
-        self.preview_timer.start(600)
+        self.preview_timer.start(350)
 
     def filter_table(self, query: str):
         """Filters queue table rows dynamically matching title or URL."""
@@ -514,12 +771,18 @@ class MainWindow(QMainWindow):
                 self.table.setRowHidden(row, True)
 
     def fetch_title_previews(self):
-        raw_lines = self.url_input.toPlainText().split('\n')
-        if not any(line.strip() for line in raw_lines):
+        text = self.url_input.toPlainText()
+        if not text.strip():
+            self._last_preview_text = ""
             self.preview_input.clear()
             return
 
-        worker = TitlePreviewWorker(raw_lines)
+        # Skip the network roundtrip entirely when the input hasn't changed
+        if text == self._last_preview_text:
+            return
+        self._last_preview_text = text
+
+        worker = TitlePreviewWorker(text.split('\n'))
         worker.signals.fetched.connect(self.update_title_previews)
         self.threadpool.start(worker)
 
@@ -660,11 +923,13 @@ class MainWindow(QMainWindow):
     def update_status_summary(self):
         """Calculates size-based and bandwidth-aware Total ETA including extraction overhead."""
         total = self.table.rowCount()
-        active = len(self.active_workers)
-        
+        # Only workers actually running inside the pools count as Active; the
+        # remainder are still waiting in queue for a free download slot.
+        pool_running = self.video_pool.activeThreadCount() + self.audio_pool.activeThreadCount()
+        active = min(len(self.active_workers), max(pool_running, 0))
+
         completed = 0
         failed = 0
-        queued = 0
         for row in range(total):
             item = self.table.item(row, 1)
             if item:
@@ -673,8 +938,8 @@ class MainWindow(QMainWindow):
                     completed += 1
                 elif "Failed" in status:
                     failed += 1
-                elif status in ["Waiting...", "Analyzing Link..."]:
-                    queued += 1
+
+        queued = max(0, total - completed - failed - active)
 
         # Advanced Speed + File Size + Extraction Overhead Calculation
         eta_str = "-"
@@ -720,27 +985,93 @@ class MainWindow(QMainWindow):
             if total_estimated_seconds > 0:
                 eta_str = format_hms(total_estimated_seconds)
 
-        self.statusBar.showMessage(f"Total Tasks: {total}  |  Active: {active}  |  Completed: {completed}  |  Failed: {failed}  |  Total ETA: {eta_str}")
+        self.statusBar.showMessage(f"Total Tasks: {total}  |  Active: {active}  |  Queued: {queued}  |  Completed: {completed}  |  Failed: {failed}  |  Total ETA: {eta_str}")
+
+    def queue_ui_refresh(self):
+        """Coalesces expensive all-rows recalcs into a single timer tick."""
+        if not self.ui_refresh_timer.isActive():
+            self.ui_refresh_timer.start()
+
+    def refresh_aggregates(self):
+        """One-shot refresh of every aggregate indicator plus the taskbar overlay."""
+        self.update_global_progress()
+        self.update_status_summary()
+        self.sync_taskbar_progress()
+
+    def sync_taskbar_progress(self):
+        """Mirrors overall batch progress onto the Windows taskbar button."""
+        if len(self.active_workers) > 0 and self.table.rowCount() > 0:
+            self.taskbar.set_progress(self.global_progress.value(), 100)
+        else:
+            self.taskbar.clear()
+
+    def notify_batch_done(self, completion_msg: str = ""):
+        """Fires a tray notification and flashes the window when a whole batch ends."""
+        completed = failed = 0
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 1)
+            if not item:
+                continue
+            status_text = item.text()
+            if status_text == "Complete":
+                completed += 1
+            elif "Failed" in status_text:
+                failed += 1
+
+        if failed > 0:
+            tray_title = f"Batch Finished — {failed} Failed"
+            tray_body = f"{completed} downloaded successfully, {failed} failed."
+            tray_icon = QSystemTrayIcon.Warning
+        else:
+            tray_title = "Downloads Complete"
+            tray_body = completion_msg or f"{completed} file{'s' if completed != 1 else ''} downloaded successfully."
+            tray_icon = QSystemTrayIcon.Information
+        self.tray_icon.showMessage(tray_title, tray_body, tray_icon, 4000)
+
+        # Flash the taskbar entry to pull attention when the window is in background
+        if not self.isActiveWindow():
+            QApplication.alert(self, 2000)
 
     def start_downloads(self):
         raw_url_lines = self.url_input.toPlainText().split('\n')
         raw_preview_lines = self.preview_input.toPlainText().split('\n')
-        
-        urls = []
-        previews = []
+
+        # Pair every non-empty URL line with its aligned preview title
+        entries = []
         for i, line in enumerate(raw_url_lines):
             u = line.strip()
-            if u:
-                urls.append(u)
-                p = raw_preview_lines[i].strip() if i < len(raw_preview_lines) else ""
-                if p and p not in ["Failed to load title", "Invalid URL"]:
-                    previews.append(p)
-                else:
-                    previews.append(None)
+            if not u:
+                continue
+            p = raw_preview_lines[i].strip() if i < len(raw_preview_lines) else ""
+            if not p or p in ["Failed to load title", "Invalid URL"]:
+                p = None
+            entries.append((u, p))
 
-        if not urls:
+        if not entries:
             QMessageBox.warning(self, "Input Error", "Please provide at least one valid URL.")
             return
+
+        # Duplicate guard: skip links repeated in the input or already queued this session
+        known_urls = {info.get('url') for info in self.task_data.values()}
+        unique_entries = []
+        skipped_dupes = 0
+        for url, preview in entries:
+            if url in known_urls:
+                skipped_dupes += 1
+                continue
+            known_urls.add(url)
+            unique_entries.append((url, preview))
+
+        if not unique_entries:
+            QMessageBox.information(self, "Nothing New", "All links are already in the download queue.")
+            return
+
+        if skipped_dupes:
+            self.desktop_toast.show_notification(
+                "✓ Duplicates Skipped",
+                f"{skipped_dupes} duplicate link{'s' if skipped_dupes != 1 else ''} ignored.",
+                2600
+            )
 
         self.batch_start_time = time.time()
         os.makedirs(self.entry_path.text(), exist_ok=True)
@@ -751,11 +1082,11 @@ class MainWindow(QMainWindow):
             'format': self.combo_format.currentText(),
             'quality': self.combo_quality.currentText(),
             'audio_boost': self.combo_boost.currentText(),
+            'use_aria2': bool(self.settings.get("use_aria2", False)),
             'queued_time': self.batch_start_time
         }
 
-        for idx, url in enumerate(urls):
-            cached_title = previews[idx]
+        for url, cached_title in unique_entries:
             self.add_task(url, options, title=cached_title)
 
     def _make_cancel_button(self, task_id: str) -> QPushButton:
@@ -763,6 +1094,10 @@ class MainWindow(QMainWindow):
         btn_cancel = QPushButton("Cancel")
         btn_cancel.clicked.connect(lambda _, tid=task_id: self.cancel_task(tid))
         return btn_cancel
+
+    def _pool_for_format(self, fmt) -> QThreadPool:
+        """Audio tasks use the wide conversion pool; video stays bandwidth-capped."""
+        return self.audio_pool if "Audio" in (fmt or "") else self.video_pool
 
     def _launch_download_worker(self, task_id: str, url: str, options: dict, pre_data: dict = None):
         """Builds, wires and queues a DownloadWorker for the given task."""
@@ -772,7 +1107,8 @@ class MainWindow(QMainWindow):
         worker.signals.error.connect(self.task_error)
 
         self.active_workers[task_id] = worker
-        self.threadpool.start(worker)
+        # Pool choice enforces the per-format concurrency cap; excess tasks queue
+        self._pool_for_format(options.get('format')).start(worker)
 
     def _row_to_task_id(self, row: int):
         """Reverse lookup returning the task id mapped to a table row, or None."""
@@ -825,8 +1161,7 @@ class MainWindow(QMainWindow):
         self._launch_download_worker(task_id, url, options, pre_data)
 
         self.filter_table(self.search_input.text())
-        self.update_status_summary()
-        self.update_global_progress()
+        self.refresh_aggregates()
 
     def cancel_task(self, task_id):
         worker = self.active_workers.get(task_id)
@@ -858,8 +1193,7 @@ class MainWindow(QMainWindow):
         
         # Build and queue the new worker instance
         self._launch_download_worker(task_id, url, options)
-        self.update_status_summary()
-        self.update_global_progress()
+        self.refresh_aggregates()
 
     def remove_task_row(self, task_id):
         row = self.row_mapping.get(task_id)
@@ -884,9 +1218,8 @@ class MainWindow(QMainWindow):
         for tid, r_idx in list(self.row_mapping.items()):
             if r_idx > row:
                 self.row_mapping[tid] = r_idx - 1
-                
-        self.update_status_summary()
-        self.update_global_progress()
+
+        self.refresh_aggregates()
 
     def clear_completed_tasks(self):
         completed_ids = []
@@ -931,7 +1264,6 @@ class MainWindow(QMainWindow):
                         perc = float(perc_str)
                         progress_bar.setValue(int(perc))
                         progress_bar.setFormat("%p%")
-                        self.update_global_progress()
                     except ValueError:
                         pass
             
@@ -953,7 +1285,8 @@ class MainWindow(QMainWindow):
                 'total_bytes': data.get('total_bytes', 0),
                 'eta_seconds': data.get('eta_seconds', 0)
             }
-        self.update_status_summary()
+        # High-frequency path: aggregate recalcs are coalesced onto a 250ms timer
+        self.queue_ui_refresh()
 
     def task_finished(self, task_id, file_path, completion_msg="", elapsed_str=""):
         row = self.row_mapping.get(task_id)
@@ -984,23 +1317,23 @@ class MainWindow(QMainWindow):
         btn_open.clicked.connect(lambda _, fp=file_path: self.open_file(fp))
         self.table.setCellWidget(row, 5, btn_open)
         
-        self.update_global_progress()  # Recalculate global average on success
+        self.refresh_aggregates()
 
         # Automatically clear completed row after 2 seconds if checked
         if self.chk_auto_clear.isChecked():
             QTimer.singleShot(2000, lambda: self.remove_task_row(task_id))
-                
+
         self._cleanup_worker(task_id)
-        self.update_status_summary()
-        
+
         # Play system sound notification and show total batch duration when all tasks finish
         if len(self.active_workers) == 0:
             if self.batch_start_time:
                 batch_sec = int(time.time() - self.batch_start_time)
                 completion_msg = f"Your download completed in {format_elapsed_words(batch_sec)}"
-            
+
             self.play_finished_sound()
-            
+            self.notify_batch_done(completion_msg)
+
         if completion_msg:
             self.statusBar.showMessage(completion_msg, 10000)
             
@@ -1019,10 +1352,9 @@ class MainWindow(QMainWindow):
         btn_retry.clicked.connect(lambda _, tid=task_id: self.retry_task(tid))
         self.table.setCellWidget(row, 5, btn_retry)
             
-        self.update_global_progress()  # Recalculate global average on failure
+        self.refresh_aggregates()
         self._cleanup_worker(task_id)
-        self.update_status_summary()
-        
+
         # Play system sound notification if all active processing is finished (even on fail)
         if len(self.active_workers) == 0:
             self.play_finished_sound()
