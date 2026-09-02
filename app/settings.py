@@ -25,11 +25,6 @@ class Settings:
             "confirm_exit_downloading": True,
             "restore_links": False,
             "saved_links": "",
-            "expand_playlists": False,
-            "max_speed_mb": 0,
-            "max_video_downloads": 8,
-            "power_action": "None",
-            "open_folder_after": False,
             "threads": max(12, (os.cpu_count() or 4) * 2)
         }
         self.load()

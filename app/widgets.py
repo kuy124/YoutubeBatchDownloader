@@ -1,6 +1,6 @@
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QGraphicsDropShadowEffect, QCheckBox
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QGraphicsDropShadowEffect
 from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QParallelAnimationGroup, QEasingCurve, QPoint
-from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPainterPath, QPen, QFontMetrics
+from PySide6.QtGui import QColor, QGuiApplication
 
 
 class DesktopToast(QWidget):
@@ -139,93 +139,3 @@ class DesktopToast(QWidget):
 
     def mousePressEvent(self, event):
         self.fade_out()
-
-
-class ThemedCheckBox(QCheckBox):
-    """QCheckBox with a custom-painted indicator that reads theme tokens
-    live from the active theme.  The tick mark is a crisp white QPainterPath
-    over a primary-coloured rounded box — no image assets required."""
-
-    INDICATOR_SIZE = 16
-    INDICATOR_GAP = 6
-    BOX_RADIUS = 4
-    _CHECK_POINTS = [
-        (0.21, 0.50), (0.40, 0.70), (0.79, 0.32),
-    ]
-
-    def __init__(self, text: str = "", parent=None):
-        super().__init__(text, parent)
-        self._tokens: dict = {}
-        self.setCursor(Qt.PointingHandCursor)
-
-    def set_tokens(self, tokens: dict):
-        self._tokens = tokens
-        self.update()
-
-    def _t(self, key: str, fallback: str = "#888888") -> str:
-        return self._tokens.get(key, fallback)
-
-    # -- geometry helpers ---------------------------------------------------
-
-    def _indicator_rect(self) -> "QRect":
-        from PySide6.QtCore import QRect
-        s = self.INDICATOR_SIZE
-        fm = QFontMetrics(self.font())
-        text_w = fm.horizontalAdvance(self.text())
-        total = self.INDICATOR_GAP + s + self.INDICATOR_GAP + text_w
-        x = int((self.width() - total) / 2)
-        y = int((self.height() - s) / 2)
-        return QRect(x, y, s, s)
-
-    # -- painting -----------------------------------------------------------
-
-    def paintEvent(self, event):
-        from PySide6.QtGui import QFontMetrics as FM
-        from PySide6.QtWidgets import QStyleOptionButton
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.setRenderHint(QPainter.TextAntialiasing)
-
-        ir = self._indicator_rect()
-        hovered = self.underMouse()
-        checked = self.isChecked()
-        enabled = self.isEnabled()
-
-        if not enabled:
-            bg = self._t("surface")
-            border = self._t("border")
-        elif hovered:
-            bg = self._t("surface_hover")
-            border = self._t("focus")
-        else:
-            bg = self._t("surface")
-            border = self._t("border")
-
-        # indicator box
-        p.setPen(QPen(QColor(border), 1.5))
-        p.setBrush(QColor(bg))
-        p.drawRoundedRect(ir, self.BOX_RADIUS, self.BOX_RADIUS)
-
-        # checked fill + white tick
-        if checked:
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor(self._t("primary")))
-            p.drawRoundedRect(ir, self.BOX_RADIUS, self.BOX_RADIUS)
-            pen = QPen(QColor("#ffffff"), 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-            p.setPen(pen)
-            p.setBrush(Qt.NoBrush)
-            path = QPainterPath()
-            s = float(ir.width())
-            path.moveTo(ir.x() + s * self._CHECK_POINTS[0][0],
-                        ir.y() + s * self._CHECK_POINTS[0][1])
-            for pt in self._CHECK_POINTS[1:]:
-                path.lineTo(ir.x() + s * pt[0], ir.y() + s * pt[1])
-            p.drawPath(path)
-
-        p.end()
-
-        # text — drawn by the native style so elide/alignment stays correct
-        opt = QStyleOptionButton()
-        self.initStyleOption(opt)
-        self.style().drawControl(
-            self.style().CE_CheckBoxLabel, opt, p, self)
