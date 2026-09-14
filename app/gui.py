@@ -554,7 +554,7 @@ class MainWindow(QMainWindow):
         qss, palette = build_theme(theme_name)
         QApplication.instance().setPalette(palette)
         self.setStyleSheet(qss)
-        self._current_theme = "Light" if isinstance(theme_name, str) and theme_name.strip().lower() == "light" else "Dark"
+        self._current_theme = theme_name if theme_name in THEMES else "Dark"
 
     def _change_theme(self, display_name: str):
         """Persists and live-applies a theme chosen in the options dialog."""
