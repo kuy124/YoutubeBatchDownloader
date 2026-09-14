@@ -7,7 +7,18 @@ from string import Template
 
 from PySide6.QtGui import QColor, QPalette
 
-THEMES = ["Dark", "Light"]
+THEMES = [
+    "Dark",
+    "Light",
+    "Midnight Navy",
+    "Nord",
+    "Dracula",
+    "Emerald",
+    "Monokai",
+    "Rose Pine",
+    "Solarized Dark",
+    "Solarized Light"
+]
 
 _DARK = {
     "bg": "#0b0f19",
@@ -55,6 +66,211 @@ _LIGHT = {
     "scrollbar": "#b0bec5",
     "progress_text": "#1a237e",
     "progress_chunk": "#0288d1",
+}
+
+_MIDNIGHT_NAVY = {
+    "bg": "#0a0f1d",
+    "surface": "#121a2f",
+    "surface_hover": "#1a2642",
+    "surface_pressed": "#223156",
+    "alt": "#0e1528",
+    "border": "#203055",
+    "text": "#e2e8f0",
+    "muted": "#8fa2c2",
+    "primary": "#2563eb",
+    "primary_hover": "#3b82f6",
+    "primary_pressed": "#1d4ed8",
+    "danger": "#ef4444",
+    "danger_border": "#7f1d1d",
+    "danger_bg": "#2a1215",
+    "focus": "#60a5fa",
+    "grid": "#172340",
+    "header_bg": "#0e162c",
+    "selection_bg": "#1e3a8a",
+    "scrollbar": "#2d4374",
+    "progress_text": "#ffffff",
+    "progress_chunk": "#2563eb",
+}
+
+_NORD = {
+    "bg": "#242933",
+    "surface": "#2e3440",
+    "surface_hover": "#3b4252",
+    "surface_pressed": "#434c5e",
+    "alt": "#2b303c",
+    "border": "#4c566a",
+    "text": "#eceff4",
+    "muted": "#d8dee9",
+    "primary": "#88c0d0",
+    "primary_hover": "#8fbcbb",
+    "primary_pressed": "#81a1c1",
+    "danger": "#bf616a",
+    "danger_border": "#80383f",
+    "danger_bg": "#3d262a",
+    "focus": "#88c0d0",
+    "grid": "#3b4252",
+    "header_bg": "#2a2f3a",
+    "selection_bg": "#434c5e",
+    "scrollbar": "#4c566a",
+    "progress_text": "#ffffff",
+    "progress_chunk": "#88c0d0",
+}
+
+_DRACULA = {
+    "bg": "#1e1f29",
+    "surface": "#282a36",
+    "surface_hover": "#343746",
+    "surface_pressed": "#44475a",
+    "alt": "#222430",
+    "border": "#44475a",
+    "text": "#f8f8f2",
+    "muted": "#6272a4",
+    "primary": "#bd93f9",
+    "primary_hover": "#caa6f7",
+    "primary_pressed": "#a777ea",
+    "danger": "#ff5555",
+    "danger_border": "#852222",
+    "danger_bg": "#351c20",
+    "focus": "#bd93f9",
+    "grid": "#343746",
+    "header_bg": "#21222c",
+    "selection_bg": "#44475a",
+    "scrollbar": "#6272a4",
+    "progress_text": "#ffffff",
+    "progress_chunk": "#bd93f9",
+}
+
+_EMERALD = {
+    "bg": "#0d1712",
+    "surface": "#14231b",
+    "surface_hover": "#1b3126",
+    "surface_pressed": "#233e31",
+    "alt": "#101e17",
+    "border": "#274939",
+    "text": "#e6f4ed",
+    "muted": "#86a997",
+    "primary": "#10b981",
+    "primary_hover": "#34d399",
+    "primary_pressed": "#059669",
+    "danger": "#f87171",
+    "danger_border": "#7f2a2a",
+    "danger_bg": "#2a1416",
+    "focus": "#34d399",
+    "grid": "#1b3327",
+    "header_bg": "#101c15",
+    "selection_bg": "#134e38",
+    "scrollbar": "#2d5c46",
+    "progress_text": "#ffffff",
+    "progress_chunk": "#10b981",
+}
+
+_MONOKAI = {
+    "bg": "#1d1e19",
+    "surface": "#272822",
+    "surface_hover": "#33342c",
+    "surface_pressed": "#3e3f36",
+    "alt": "#22231d",
+    "border": "#49483e",
+    "text": "#f8f8f2",
+    "muted": "#75715e",
+    "primary": "#fd971f",
+    "primary_hover": "#e68a19",
+    "primary_pressed": "#cc750d",
+    "danger": "#f92672",
+    "danger_border": "#8c143e",
+    "danger_bg": "#36141e",
+    "focus": "#fd971f",
+    "grid": "#383830",
+    "header_bg": "#20211b",
+    "selection_bg": "#49483e",
+    "scrollbar": "#75715e",
+    "progress_text": "#ffffff",
+    "progress_chunk": "#fd971f",
+}
+
+_ROSE_PINE = {
+    "bg": "#191724",
+    "surface": "#1f1d2e",
+    "surface_hover": "#26233a",
+    "surface_pressed": "#312d47",
+    "alt": "#1b1929",
+    "border": "#403d52",
+    "text": "#e0def4",
+    "muted": "#908caa",
+    "primary": "#eb6f92",
+    "primary_hover": "#f083a2",
+    "primary_pressed": "#d9587c",
+    "danger": "#eb6f92",
+    "danger_border": "#78273d",
+    "danger_bg": "#2d1721",
+    "focus": "#eb6f92",
+    "grid": "#26233a",
+    "header_bg": "#181622",
+    "selection_bg": "#3e3759",
+    "scrollbar": "#524f67",
+    "progress_text": "#ffffff",
+    "progress_chunk": "#eb6f92",
+}
+
+_SOLARIZED_DARK = {
+    "bg": "#00212b",
+    "surface": "#073642",
+    "surface_hover": "#0b4352",
+    "surface_pressed": "#0f5263",
+    "alt": "#002b36",
+    "border": "#1d5361",
+    "text": "#93a1a1",
+    "muted": "#657b83",
+    "primary": "#268bd2",
+    "primary_hover": "#389be0",
+    "primary_pressed": "#1d76b5",
+    "danger": "#dc322f",
+    "danger_border": "#7a1715",
+    "danger_bg": "#291515",
+    "focus": "#2aa198",
+    "grid": "#0d4352",
+    "header_bg": "#002833",
+    "selection_bg": "#0e4f61",
+    "scrollbar": "#2d6979",
+    "progress_text": "#ffffff",
+    "progress_chunk": "#268bd2",
+}
+
+_SOLARIZED_LIGHT = {
+    "bg": "#fdf6e3",
+    "surface": "#eee8d5",
+    "surface_hover": "#e4ddc8",
+    "surface_pressed": "#d8d0b9",
+    "alt": "#f5eed9",
+    "border": "#d3cbb7",
+    "text": "#586e75",
+    "muted": "#839496",
+    "primary": "#268bd2",
+    "primary_hover": "#1f7cb8",
+    "primary_pressed": "#18699d",
+    "danger": "#dc322f",
+    "danger_border": "#f09a98",
+    "danger_bg": "#fce4e4",
+    "focus": "#2aa198",
+    "grid": "#dfd8c4",
+    "header_bg": "#e6dfca",
+    "selection_bg": "#d5e4ec",
+    "scrollbar": "#b4ab95",
+    "progress_text": "#002b36",
+    "progress_chunk": "#268bd2",
+}
+
+_THEME_MAP = {
+    "dark": _DARK,
+    "light": _LIGHT,
+    "midnight navy": _MIDNIGHT_NAVY,
+    "nord": _NORD,
+    "dracula": _DRACULA,
+    "emerald": _EMERALD,
+    "monokai": _MONOKAI,
+    "rose pine": _ROSE_PINE,
+    "solarized dark": _SOLARIZED_DARK,
+    "solarized light": _SOLARIZED_LIGHT,
 }
 
 _QSS_TEMPLATE = Template("""
@@ -225,13 +441,11 @@ def _build_palette(t: dict) -> QPalette:
 
 
 def build_theme(name: str):
-    """Returns (stylesheet, palette) for 'Dark' or 'Light' (case-insensitive).
+    """Returns (stylesheet, palette) for the specified theme name (case-insensitive).
 
     Unknown names fall back to Dark so a corrupted settings value can never
     produce an unreadable half-styled window.
     """
-    if isinstance(name, str) and name.strip().lower() == "light":
-        tokens = _LIGHT
-    else:
-        tokens = _DARK
+    key = str(name).strip().lower() if name else "dark"
+    tokens = _THEME_MAP.get(key, _DARK)
     return _QSS_TEMPLATE.safe_substitute(tokens), _build_palette(tokens)
