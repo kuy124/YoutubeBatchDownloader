@@ -72,9 +72,9 @@ QPushButton {
     background-color: ${surface};
     border: 1px solid ${border};
     border-radius: 4px;
-    padding: 7px 16px;
+    padding: 5px 12px;
     color: ${text};
-    font-weight: 600;
+    font-weight: 500;
 }
 QPushButton:hover { background-color: ${surface_hover}; }
 QPushButton:pressed { background-color: ${surface_pressed}; }
@@ -82,24 +82,24 @@ QPushButton:focus { border-color: ${focus}; }
 
 QPushButton[variant="primary"] {
     background-color: ${primary}; color: #ffffff;
-    border: 1px solid ${primary}; padding: 9px 20px; font-weight: 700;
+    border: 1px solid ${primary}; padding: 5px 14px; font-weight: 600;
 }
 QPushButton[variant="primary"]:hover { background-color: ${primary_hover}; }
 QPushButton[variant="primary"]:pressed { background-color: ${primary_pressed}; }
 
 QPushButton[variant="danger"] {
     background-color: ${surface}; color: ${danger};
-    border: 1px solid ${danger_border}; padding: 9px 16px; font-weight: 700;
+    border: 1px solid ${danger_border}; padding: 5px 12px; font-weight: 600;
 }
 QPushButton[variant="danger"]:hover { background-color: ${danger_bg}; }
 
 QPushButton[variant="chip"] {
     background-color: ${surface}; color: ${text};
-    border: 1px solid ${border}; padding: 9px 16px; font-weight: 700;
+    border: 1px solid ${border}; padding: 5px 12px; font-weight: 500;
 }
 
 QPushButton[variant="cell"] {
-    padding: 3px 12px; font-weight: 500; border-radius: 3px;
+    padding: 2px 8px; font-weight: 500; border-radius: 3px;
 }
 QPushButton[variant="cell-primary"] {
     background-color: ${progress_chunk}; color: #ffffff;
@@ -112,16 +112,16 @@ QPushButton[variant="cell-danger"] {
 }
 QPushButton[variant="cell-danger"]:hover { background-color: ${danger_bg}; }
 
-QLineEdit, QComboBox {
+QLineEdit, QComboBox, QTextEdit {
     background-color: ${surface};
     border: 1px solid ${border};
     border-radius: 4px;
-    padding: 5px 8px;
+    padding: 4px 8px;
     color: ${text};
     selection-background-color: ${selection_bg};
     selection-color: ${text};
 }
-QLineEdit:focus, QComboBox:focus { border-color: ${focus}; }
+QLineEdit:focus, QComboBox:focus, QTextEdit:focus { border-color: ${focus}; }
 
 QComboBox QAbstractItemView {
     background-color: ${surface};
@@ -156,6 +156,26 @@ QCheckBox::indicator {
 }
 QCheckBox::indicator:hover { border-color: ${focus}; }
 QCheckBox::indicator:checked { background-color: ${primary}; border-color: ${primary}; }
+
+QScrollArea {
+    border: none;
+    background: transparent;
+}
+
+QGroupBox {
+    color: ${text};
+    font-weight: 600;
+    border: 1px solid ${border};
+    border-radius: 6px;
+    margin-top: 12px;
+    padding: 12px 10px 10px 10px;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 10px;
+    padding: 0 4px;
+}
 
 #globalProgress {
     border: 1px solid ${border};
