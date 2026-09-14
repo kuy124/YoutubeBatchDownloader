@@ -287,10 +287,20 @@ class DownloadWorker(QRunnable):
         self.download_start_time = None
         self.queued_time = self.options.get('queued_time') or time.time()
         self.speed_history = []  # Rolling 15-sample window for smooth Mbps & steady ETA
+        self.is_paused = False
+
+    def pause(self):
+        """Pauses the download worker loop."""
+        self.is_paused = True
+
+    def resume(self):
+        """Resumes the download worker loop."""
+        self.is_paused = False
 
     def cancel(self):
         """Triggers cancellation and immediately kills any active conversion/transcoding process."""
         self.is_cancelled = True
+        self.is_paused = False
         if self.current_process and self.current_process.poll() is None:
             try:
                 self.current_process.kill()
@@ -331,6 +341,12 @@ class DownloadWorker(QRunnable):
             })
 
     def hook(self, d):
+        if self.is_cancelled:
+            raise Exception("CANCELLED_BY_USER")
+
+        while self.is_paused and not self.is_cancelled:
+            time.sleep(0.1)
+
         if self.is_cancelled:
             raise Exception("CANCELLED_BY_USER")
 
@@ -743,6 +759,9 @@ class DownloadWorker(QRunnable):
         # --- Automatic Background Retry Loop ---
         max_auto_retries = 3
         for attempt in range(max_auto_retries + 1):
+            while self.is_paused and not self.is_cancelled:
+                time.sleep(0.1)
+
             if self.is_cancelled:
                 self.cleanup_partial_files(self.final_filename)
                 self.signals.error.emit(self.task_id, "Cancelled.")
