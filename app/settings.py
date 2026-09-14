@@ -50,6 +50,12 @@ class Settings:
     def get(self, key, default=None):
         return self.config.get(key, default)
 
-    def set(self, key, value):
+    def set(self, key, value, save=True):
         self.config[key] = value
-        self.save()
+        if save:
+            self.save()
+
+    def update(self, new_data: dict, save=True):
+        self.config.update(new_data)
+        if save:
+            self.save()
