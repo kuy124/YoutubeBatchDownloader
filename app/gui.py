@@ -7,7 +7,8 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                                QLabel, QTextEdit, QPushButton, QComboBox, QCheckBox,
                                QLineEdit, QFileDialog, QTableWidget, QTableWidgetItem,
                                QHeaderView, QProgressBar, QMessageBox, QApplication, QScrollBar,
-                               QGridLayout, QMenu, QSystemTrayIcon, QStyle, QDialog, QFormLayout)
+                               QGridLayout, QMenu, QSystemTrayIcon, QStyle, QDialog, QFormLayout,
+                               QScrollArea, QGroupBox)
 from PySide6.QtCore import QThreadPool, Qt, QTimer
 from PySide6.QtGui import (QBrush, QColor, QIcon, QTextCharFormat, QTextCursor,
                            QKeySequence, QShortcut, QAction)
@@ -32,6 +33,12 @@ from .updater import APP_VERSION, UpdateWorker
 from .utils import extract_http_links, format_elapsed_words, format_hms, get_icon_path, is_youtube_url
 from .widgets import DesktopToast
 from .win_taskbar import WinTaskbarProgress
+
+
+class NoScrollComboBox(QComboBox):
+    def wheelEvent(self, event):
+        event.ignore()
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -74,6 +81,12 @@ class MainWindow(QMainWindow):
         self.ui_refresh_timer.setSingleShot(True)
         self.ui_refresh_timer.setInterval(250)
         self.ui_refresh_timer.timeout.connect(self.refresh_aggregates)
+
+        # Debounced settings saver: eliminates synchronous disk I/O freezes on UI toggles
+        self.save_settings_timer = QTimer(self)
+        self.save_settings_timer.setSingleShot(True)
+        self.save_settings_timer.setInterval(300)
+        self.save_settings_timer.timeout.connect(self._flush_settings_to_disk)
 
         # Remembers the last text previews were fetched for, to skip redundant refetches
         self._last_preview_text = ""
@@ -129,6 +142,10 @@ class MainWindow(QMainWindow):
 
         if self.chk_restore_links.isChecked():
             self.settings.set("saved_links", self.url_input.toPlainText())
+
+        if self.save_settings_timer.isActive():
+            self.save_settings_timer.stop()
+            self._flush_settings_to_disk()
 
         self.preview_timer.stop()
         self.clipboard_timer.stop()
@@ -285,21 +302,9 @@ class MainWindow(QMainWindow):
         url_btn_layout.addWidget(btn_paste)
         url_btn_layout.addWidget(btn_clear)
         url_btn_layout.addStretch()
-
-        # Compact "find inside pasted list" moved onto this row to save a full row
-        url_btn_layout.addWidget(QLabel("Find:"))
-        self.search_url_input = QLineEdit()
-        self.search_url_input.setPlaceholderText("Highlight in URLs...")
-        self.search_url_input.setMaximumWidth(220)
-        self.search_url_input.textChanged.connect(self.search_input_textboxes)
-        url_btn_layout.addWidget(self.search_url_input)
-
-        self.lbl_url_matches = QLabel("")
-        url_btn_layout.addWidget(self.lbl_url_matches)
         layout.addLayout(url_btn_layout)
 
-        # ---------------- Download Options Dialog ----------------
-        # Every conversion choice lives behind one compact chip on the main page
+        # ---------------- Unified Scrollable Settings Dialog ----------------
         self.video_qualities = ["Best", "4K (2160p)", "1440p (2K)", "1080p", "720p", "480p"]
         self.audio_qualities = [
             "320 kbps (Extreme)",
@@ -309,14 +314,60 @@ class MainWindow(QMainWindow):
             "96 kbps (Low / Small Size)"
         ]
 
-        self.options_dialog = QDialog(self)
-        self.options_dialog.setWindowTitle("Download Options")
-        options_form = QFormLayout(self.options_dialog)
-        options_form.setLabelAlignment(Qt.AlignRight)
-        options_form.setHorizontalSpacing(14)
+        self.settings_dialog = QDialog(self)
+        self.settings_dialog.setWindowTitle("Settings")
+        self.settings_dialog.resize(520, 500)
+        settings_main_lay = QVBoxLayout(self.settings_dialog)
+        settings_main_lay.setContentsMargins(12, 12, 12, 12)
+        settings_main_lay.setSpacing(8)
 
-        # Formats
-        self.combo_format = QComboBox()
+        self.settings_scroll = QScrollArea()
+        self.settings_scroll.setWidgetResizable(True)
+
+        scroll_content = QWidget()
+        content_lay = QVBoxLayout(scroll_content)
+        content_lay.setContentsMargins(8, 4, 8, 8)
+        content_lay.setSpacing(12)
+
+        # Section 1: Storage and Downloads
+        self.grp_storage = QGroupBox("Storage and Downloads")
+        storage_box_lay = QVBoxLayout(self.grp_storage)
+        storage_box_lay.setSpacing(8)
+
+        path_row = QHBoxLayout()
+        self.entry_path = QLineEdit()
+        self.entry_path.setReadOnly(True)
+        path_row.addWidget(self.entry_path)
+        btn_browse = QPushButton("Browse...")
+        btn_browse.clicked.connect(self.browse_folder)
+        path_row.addWidget(btn_browse)
+        btn_open_in_settings = QPushButton("Open Directory")
+        btn_open_in_settings.clicked.connect(self.open_downloads_folder)
+        path_row.addWidget(btn_open_in_settings)
+        storage_box_lay.addLayout(path_row)
+
+        self.chk_aria2 = QCheckBox("Enable aria2c multi-connection acceleration (16 connections per file)")
+        self.chk_aria2.toggled.connect(lambda: self.save_current_settings())
+        self.chk_auto_clear = QCheckBox("Automatically clear completed downloads after 2 seconds")
+        self.chk_auto_clear.toggled.connect(lambda: self.save_current_settings())
+        self.chk_restore_links = QCheckBox("Restore unfinished download links on startup")
+        self.chk_restore_links.toggled.connect(lambda: self.save_current_settings())
+        self.chk_confirm_exit = QCheckBox("Confirm before exiting when downloads are active")
+        self.chk_confirm_exit.toggled.connect(lambda: self.save_current_settings())
+
+        storage_box_lay.addWidget(self.chk_aria2)
+        storage_box_lay.addWidget(self.chk_auto_clear)
+        storage_box_lay.addWidget(self.chk_restore_links)
+        storage_box_lay.addWidget(self.chk_confirm_exit)
+        content_lay.addWidget(self.grp_storage)
+
+        # Section 2: Format and Quality
+        self.grp_format = QGroupBox("Format and Quality")
+        form_format = QFormLayout(self.grp_format)
+        form_format.setLabelAlignment(Qt.AlignRight)
+        form_format.setHorizontalSpacing(12)
+
+        self.combo_format = NoScrollComboBox()
         self.combo_format.addItems([
             "Best Quality (MKV)",
             "MP4 Video",
@@ -330,26 +381,23 @@ class MainWindow(QMainWindow):
             "AAC Audio",
             "OPUS Audio"
         ])
-        options_form.addRow("Format:", self.combo_format)
+        form_format.addRow("Format:", self.combo_format)
 
-        # Quality (Dynamic Label & Items)
         quality_row = QWidget()
         quality_lay = QHBoxLayout(quality_row)
         quality_lay.setContentsMargins(0, 0, 0, 0)
         self.lbl_quality = QLabel("Max Resolution:")
-        self.combo_quality = QComboBox()
+        self.combo_quality = NoScrollComboBox()
         self.combo_quality.addItems(self.video_qualities)
         quality_lay.addWidget(self.lbl_quality)
         quality_lay.addWidget(self.combo_quality)
         quality_lay.addStretch()
-        options_form.addRow("Quality:", quality_row)
+        form_format.addRow("Quality:", quality_row)
 
-        # Switch quality options dynamically when format changes
         self.combo_format.currentTextChanged.connect(self.on_format_changed)
         self.combo_quality.currentTextChanged.connect(lambda: self.save_current_settings())
 
-        # Audio Boost
-        self.combo_boost = QComboBox()
+        self.combo_boost = NoScrollComboBox()
         self.combo_boost.addItems([
             "100% (Original)",
             "125% (+2 dB)",
@@ -359,105 +407,81 @@ class MainWindow(QMainWindow):
             "250% (+8 dB)",
             "300% (+9.5 dB)"
         ])
-        options_form.addRow("Audio Boost:", self.combo_boost)
+        self.combo_boost.currentTextChanged.connect(lambda: self.save_current_settings())
+        form_format.addRow("Audio Boost:", self.combo_boost)
+        content_lay.addWidget(self.grp_format)
 
-        # Footer
-        footer_row = QWidget()
-        footer_lay = QHBoxLayout(footer_row)
-        footer_lay.setContentsMargins(0, 0, 0, 0)
-        footer_lay.addStretch()
-        btn_close_options = QPushButton("Close")
-        btn_close_options.clicked.connect(self.options_dialog.close)
-        footer_lay.addWidget(btn_close_options)
-        options_form.addRow(footer_row)
+        # Section 3: Appearance and Notifications
+        self.grp_appearance = QGroupBox("Appearance and Notifications")
+        appearance_box_lay = QVBoxLayout(self.grp_appearance)
+        appearance_box_lay.setSpacing(8)
 
-        # ---------------- System Preferences Dialog ----------------
-        # Appearance + app behavior live apart from conversion settings on purpose
-        self.system_dialog = QDialog(self)
-        self.system_dialog.setWindowTitle("System Preferences")
-        system_form = QFormLayout(self.system_dialog)
-        system_form.setLabelAlignment(Qt.AlignRight)
-        system_form.setHorizontalSpacing(14)
-
-        system_form.addRow(QLabel("<b>Appearance</b>"))
-        theme_row = QWidget()
-        theme_lay = QHBoxLayout(theme_row)
-        theme_lay.setContentsMargins(0, 0, 0, 0)
-        self.combo_theme = QComboBox()
+        theme_form = QFormLayout()
+        self.combo_theme = NoScrollComboBox()
         self.combo_theme.addItems(THEMES)
         saved_theme = self.settings.get("theme", "Dark")
         theme_idx = self.combo_theme.findText(saved_theme if saved_theme in THEMES else "Dark")
         self.combo_theme.setCurrentIndex(theme_idx if theme_idx != -1 else 0)
         self.combo_theme.currentTextChanged.connect(self._change_theme)
-        theme_lay.addWidget(self.combo_theme)
-        theme_lay.addStretch()
-        system_form.addRow("Theme:", theme_row)
+        theme_form.addRow("Color Theme:", self.combo_theme)
+        appearance_box_lay.addLayout(theme_form)
 
-        system_form.addRow(QLabel("<b>Behavior</b>"))
-        self.chk_auto_clear = QCheckBox("Automatically clear completed downloads (after 2 seconds)")
-        self.chk_monitor_clip = QCheckBox("Auto-Add links from Clipboard (Real-time Monitor)")
-        self.chk_completion_sound = QCheckBox("Play a sound when all downloads finish")
-        self.chk_batch_notify = QCheckBox("Show a notification when all downloads finish")
-        self.chk_confirm_exit = QCheckBox("Ask before closing while downloads are running")
-        self.chk_restore_links = QCheckBox("Restore the link list on launch")
-        system_form.addRow(self.chk_auto_clear)
-        system_form.addRow(self.chk_monitor_clip)
-        system_form.addRow(self.chk_completion_sound)
-        system_form.addRow(self.chk_batch_notify)
-        system_form.addRow(self.chk_confirm_exit)
-        system_form.addRow(self.chk_restore_links)
+        self.chk_monitor_clip = QCheckBox("Monitor clipboard and automatically queue copied links")
+        self.chk_completion_sound = QCheckBox("Play audio chime when downloads finish")
+        self.chk_completion_sound.toggled.connect(lambda: self.save_current_settings())
+        self.chk_batch_notify = QCheckBox("Show system notification when downloads finish")
+        self.chk_batch_notify.toggled.connect(lambda: self.save_current_settings())
 
-        sys_footer = QWidget()
-        sys_footer_lay = QHBoxLayout(sys_footer)
-        sys_footer_lay.setContentsMargins(0, 0, 0, 0)
-        btn_close_system = QPushButton("Close")
-        btn_close_system.clicked.connect(self.system_dialog.close)
-        sys_footer_lay.addStretch()
-        sys_footer_lay.addWidget(btn_close_system)
-        system_form.addRow(sys_footer)
+        appearance_box_lay.addWidget(self.chk_monitor_clip)
+        appearance_box_lay.addWidget(self.chk_completion_sound)
+        appearance_box_lay.addWidget(self.chk_batch_notify)
+        content_lay.addWidget(self.grp_appearance)
 
-        # ---------------- Menu Bar ----------------
-        # Settings owns only system preferences; download options stay on the chip
-        menu_bar = self.menuBar()
-        settings_menu = menu_bar.addMenu("&Settings")
-        act_system_prefs = settings_menu.addAction("&System Preferences…")
-        act_system_prefs.triggered.connect(self.open_system_preferences)
-        help_menu = menu_bar.addMenu("&Help")
-        act_updates = help_menu.addAction("Check for &Updates")
-        act_updates.triggered.connect(lambda: self.check_for_updates(manual=True))
+        # Section 4: Application Updates
+        self.grp_updates = QGroupBox("Updates")
+        updates_lay = QHBoxLayout(self.grp_updates)
+        updates_lay.addWidget(QLabel(f"Current Version: {APP_VERSION}"))
+        updates_lay.addStretch()
+        btn_check_updates = QPushButton("Check for Updates...")
+        btn_check_updates.clicked.connect(lambda: self.check_for_updates(manual=True))
+        updates_lay.addWidget(btn_check_updates)
+        content_lay.addWidget(self.grp_updates)
 
-        # Keep the main-page chip in sync with every option change
+        self.settings_scroll.setWidget(scroll_content)
+        settings_main_lay.addWidget(self.settings_scroll)
+
+        settings_footer = QHBoxLayout()
+        settings_footer.addStretch()
+        btn_close_settings = QPushButton("Close")
+        btn_close_settings.clicked.connect(self.settings_dialog.close)
+        settings_footer.addWidget(btn_close_settings)
+        settings_main_lay.addLayout(settings_footer)
+
         self.combo_format.currentTextChanged.connect(lambda _: self._update_options_chip_text())
         self.combo_quality.currentTextChanged.connect(lambda _: self._update_options_chip_text())
         self.combo_boost.currentTextChanged.connect(lambda _: self._update_options_chip_text())
 
-        # ---------------- Download Path ----------------
-        path_layout = QHBoxLayout()
-        path_layout.addWidget(QLabel("Download Folder:"))
-        self.entry_path = QLineEdit()
-        self.entry_path.setReadOnly(True)
-        path_layout.addWidget(self.entry_path)
-        
-        btn_browse = QPushButton("Browse")
-        btn_browse.clicked.connect(self.browse_folder)
-        path_layout.addWidget(btn_browse)
-
-        btn_open_folder = QPushButton("Open Folder")
-        btn_open_folder.clicked.connect(self.open_downloads_folder)
-        path_layout.addWidget(btn_open_folder)
-        
-        layout.addLayout(path_layout)
-
         # ---------------- Main Action Bar ----------------
         action_layout = QHBoxLayout()
 
-        # Single compact chip summarizing current conversion choices
         self.btn_options = QPushButton()
         self.btn_options.setProperty("variant", "chip")
         self.btn_options.setCursor(Qt.PointingHandCursor)
         self.btn_options.clicked.connect(self.open_download_options)
         self._update_options_chip_text()
         action_layout.addWidget(self.btn_options)
+
+        self.btn_settings = QPushButton("Settings")
+        self.btn_settings.setProperty("variant", "chip")
+        self.btn_settings.setCursor(Qt.PointingHandCursor)
+        self.btn_settings.clicked.connect(lambda: self.open_settings(scroll_to_format=False))
+        action_layout.addWidget(self.btn_settings)
+
+        btn_open_folder = QPushButton("Open Folder")
+        btn_open_folder.setProperty("variant", "chip")
+        btn_open_folder.setCursor(Qt.PointingHandCursor)
+        btn_open_folder.clicked.connect(self.open_downloads_folder)
+        action_layout.addWidget(btn_open_folder)
 
         action_layout.addStretch()
 
@@ -494,6 +518,11 @@ class MainWindow(QMainWindow):
         self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(["Video Title", "Status", "Progress", "Speed", "ETA", "Actions"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.table.setColumnWidth(1, 115)
+        self.table.setColumnWidth(2, 95)
+        self.table.setColumnWidth(3, 145)
+        self.table.setColumnWidth(4, 85)
+        self.table.setColumnWidth(5, 150)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         
         # Connect double-click on cells to run instant playback
@@ -532,6 +561,15 @@ class MainWindow(QMainWindow):
         self.settings.set("theme", display_name)
         self._apply_theme()
 
+    def toggle_theme(self):
+        """Toggles between Dark and Light mode."""
+        new_theme = "Light" if self._current_theme == "Dark" else "Dark"
+        self._change_theme(new_theme)
+        if hasattr(self, "combo_theme"):
+            self.combo_theme.blockSignals(True)
+            self.combo_theme.setCurrentText(new_theme)
+            self.combo_theme.blockSignals(False)
+
     def on_format_changed(self, format_name: str):
         """Dynamically toggles quality dropdown between Video Resolutions and Audio Bitrates."""
         self.combo_quality.blockSignals(True)
@@ -554,13 +592,21 @@ class MainWindow(QMainWindow):
         # Quality label + items just changed; refresh the main-page chip too
         self._update_options_chip_text()
 
+    def open_settings(self, scroll_to_format: bool = False):
+        """Opens the settings dialog, scrolling directly to Format if requested."""
+        if scroll_to_format:
+            QTimer.singleShot(30, lambda: self.settings_scroll.ensureWidgetVisible(self.grp_format, 0, 20))
+        else:
+            QTimer.singleShot(30, lambda: self.settings_scroll.verticalScrollBar().setValue(0))
+        self.settings_dialog.exec()
+
     def open_download_options(self):
-        """Shows the consolidated download options dialog."""
-        self.options_dialog.exec()
+        """Opens settings and smoothly scrolls directly to Format and Quality."""
+        self.open_settings(scroll_to_format=True)
 
     def open_system_preferences(self):
-        """Shows the system preferences dialog (appearance, behavior, updates)."""
-        self.system_dialog.exec()
+        """Opens settings at the top."""
+        self.open_settings(scroll_to_format=False)
 
     def _update_options_chip_text(self):
         """Summarizes the current conversion choices onto the main-page chip."""
@@ -569,13 +615,13 @@ class MainWindow(QMainWindow):
         boost_pct = self.combo_boost.currentText().split(' ')[0]
 
         short_fmt = fmt.replace(' Video', '').replace(' Audio', '')
-        text = f"Options: {short_fmt} · {qual}"
+        text = f"Format: {short_fmt} ({qual})"
         if not boost_pct.startswith('100'):
-            text += f" · Boost {boost_pct}"
+            text += f" [{boost_pct} Boost]"
         self.btn_options.setText(text)
         self.btn_options.setToolTip(
             f"Format: {fmt}\nQuality: {qual}\nAudio Boost: {self.combo_boost.currentText()}\n\n"
-            f"Click to change download options"
+            f"Click to modify output format and quality settings."
         )
 
     def apply_settings(self):
@@ -593,6 +639,7 @@ class MainWindow(QMainWindow):
             (self.chk_batch_notify, "batch_notifications", True),
             (self.chk_confirm_exit, "confirm_exit_downloading", True),
             (self.chk_restore_links, "restore_links", False),
+            (self.chk_aria2, "use_aria2", False),
         ):
             chk.blockSignals(True)
             chk.setChecked(bool(self.settings.get(key, default)))
@@ -601,22 +648,30 @@ class MainWindow(QMainWindow):
     def save_current_settings(self):
         fmt = self.combo_format.currentText()
         current_q = self.combo_quality.currentText()
-        self.settings.set("download_path", self.entry_path.text())
-        self.settings.set("format", fmt)
-        self.settings.set("quality", current_q)
-        
+        updates = {
+            "download_path": self.entry_path.text(),
+            "format": fmt,
+            "quality": current_q,
+            "audio_boost": self.combo_boost.currentText(),
+            "auto_clear": self.chk_auto_clear.isChecked(),
+            "monitor_clipboard": self.chk_monitor_clip.isChecked(),
+            "completion_sound": self.chk_completion_sound.isChecked(),
+            "batch_notifications": self.chk_batch_notify.isChecked(),
+            "confirm_exit_downloading": self.chk_confirm_exit.isChecked(),
+            "restore_links": self.chk_restore_links.isChecked(),
+            "use_aria2": self.chk_aria2.isChecked(),
+        }
         if "Audio" in fmt:
-            self.settings.set("audio_quality", current_q)
+            updates["audio_quality"] = current_q
         else:
-            self.settings.set("video_quality", current_q)
-            
-        self.settings.set("audio_boost", self.combo_boost.currentText())
-        self.settings.set("auto_clear", self.chk_auto_clear.isChecked())
-        self.settings.set("monitor_clipboard", self.chk_monitor_clip.isChecked())
-        self.settings.set("completion_sound", self.chk_completion_sound.isChecked())
-        self.settings.set("batch_notifications", self.chk_batch_notify.isChecked())
-        self.settings.set("confirm_exit_downloading", self.chk_confirm_exit.isChecked())
-        self.settings.set("restore_links", self.chk_restore_links.isChecked())
+            updates["video_quality"] = current_q
+
+        self.settings.update(updates, save=False)
+        if hasattr(self, 'save_settings_timer'):
+            self.save_settings_timer.start()
+
+    def _flush_settings_to_disk(self):
+        self.settings.save()
 
     def browse_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Download Folder", self.entry_path.text())
@@ -781,12 +836,15 @@ class MainWindow(QMainWindow):
             menu.addSeparator()
 
         act_copy = menu.addAction("Copy URL")
-        act_retry = act_cancel = None
+        act_retry = act_cancel = act_pause = None
         if status_text == "Complete":
             pass
         elif "Failed" in status_text:
             act_retry = menu.addAction("Retry Download")
         else:
+            worker = self.active_workers.get(task_id)
+            is_paused = getattr(worker, 'is_paused', False) if worker else False
+            act_pause = menu.addAction("Resume Download" if is_paused else "Pause Download")
             act_cancel = menu.addAction("Cancel Download")
         menu.addSeparator()
         act_remove = menu.addAction("Remove From List")
@@ -803,6 +861,8 @@ class MainWindow(QMainWindow):
         elif chosen == act_copy:
             url = self.task_data.get(task_id, {}).get('url', '')
             QApplication.clipboard().setText(url)
+        elif chosen == act_pause:
+            self.toggle_pause_task(task_id)
         elif chosen == act_retry:
             self.retry_task(task_id)
         elif chosen == act_cancel:
@@ -870,76 +930,6 @@ class MainWindow(QMainWindow):
 
     def update_title_previews(self, previews: list):
         self.preview_input.setPlainText("\n".join(previews))
-        self.search_input_textboxes()
-
-    def search_input_textboxes(self, query: str = None):
-        """Highlights matching URLs or titles in real-time and displays match counts."""
-        if query is None:
-            query = self.search_url_input.text()
-            
-        query = query.strip().lower()
-        
-        self.url_input.setExtraSelections([])
-        self.preview_input.setExtraSelections([])
-        
-        if not query:
-            self.lbl_url_matches.setText("")
-            return
-
-        fmt = QTextCharFormat()
-        fmt.setBackground(QColor("#fff176"))  # Soft yellow highlight
-        fmt.setForeground(QColor("#000000"))  # Dark text
-
-        url_selections = []
-        preview_selections = []
-        match_count = 0
-        first_match_block = -1
-
-        url_lines = self.url_input.toPlainText().split('\n')
-        preview_lines = self.preview_input.toPlainText().split('\n')
-
-        max_len = max(len(url_lines), len(preview_lines))
-        for idx in range(max_len):
-            u_line = url_lines[idx] if idx < len(url_lines) else ""
-            p_line = preview_lines[idx] if idx < len(preview_lines) else ""
-
-            if (u_line and query in u_line.lower()) or (p_line and query in p_line.lower()):
-                match_count += 1
-                if first_match_block == -1:
-                    first_match_block = idx
-
-                # Highlight line in url_input
-                block_u = self.url_input.document().findBlockByLineNumber(idx)
-                if block_u.isValid():
-                    cursor_u = QTextCursor(block_u)
-                    cursor_u.select(QTextCursor.SelectionType.LineUnderCursor)
-                    sel_u = QTextEdit.ExtraSelection()
-                    sel_u.cursor = cursor_u
-                    sel_u.format = fmt
-                    url_selections.append(sel_u)
-
-                # Highlight line in preview_input
-                block_p = self.preview_input.document().findBlockByLineNumber(idx)
-                if block_p.isValid():
-                    cursor_p = QTextCursor(block_p)
-                    cursor_p.select(QTextCursor.SelectionType.LineUnderCursor)
-                    sel_p = QTextEdit.ExtraSelection()
-                    sel_p.cursor = cursor_p
-                    sel_p.format = fmt
-                    preview_selections.append(sel_p)
-
-        self.url_input.setExtraSelections(url_selections)
-        self.preview_input.setExtraSelections(preview_selections)
-
-        if match_count > 0:
-            self.lbl_url_matches.setText(f"<font color='#2e7d32'><b>{match_count} match{'es' if match_count != 1 else ''} found</b></font>")
-            if first_match_block != -1:
-                block = self.url_input.document().findBlockByLineNumber(first_match_block)
-                if block.isValid():
-                    cursor = QTextCursor(block)
-                    self.url_input.setTextCursor(cursor)
-        else:
-            self.lbl_url_matches.setText("<font color='#d32f2f'><b>No matches found</b></font>")
 
     def cancel_all_tasks(self):
         """Smart cancel handler checking for completed tasks and active queue state."""
@@ -1174,12 +1164,64 @@ class MainWindow(QMainWindow):
         for url, cached_title in unique_entries:
             self.add_task(url, options, title=cached_title)
 
-    def _make_cancel_button(self, task_id: str) -> QPushButton:
-        """Builds a Cancel button wired to the given task id."""
+    def _make_action_widget(self, task_id: str) -> QWidget:
+        """Builds an action container with Pause and Cancel buttons."""
+        container = QWidget()
+        lay = QHBoxLayout(container)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+
+        btn_pause = QPushButton("Pause")
+        btn_pause.setProperty("variant", "cell")
+        btn_pause.setObjectName("btn_pause")
+        btn_pause.clicked.connect(lambda _, tid=task_id: self.toggle_pause_task(tid))
+        lay.addWidget(btn_pause)
+
         btn_cancel = QPushButton("Cancel")
         btn_cancel.setProperty("variant", "cell")
         btn_cancel.clicked.connect(lambda _, tid=task_id: self.cancel_task(tid))
-        return btn_cancel
+        lay.addWidget(btn_cancel)
+
+        return container
+
+    def _find_pause_button(self, row: int):
+        widget = self.table.cellWidget(row, 5)
+        if widget:
+            return widget.findChild(QPushButton, "btn_pause")
+        return None
+
+    def toggle_pause_task(self, task_id: str):
+        worker = self.active_workers.get(task_id)
+        row = self.row_mapping.get(task_id)
+        if not worker or row is None:
+            return
+
+        btn_pause = self._find_pause_button(row)
+
+        if worker.is_paused:
+            worker.resume()
+            if btn_pause:
+                btn_pause.setText("Pause")
+            status_item = self.table.item(row, 1)
+            if status_item:
+                status_item.setText("Downloading")
+                status_item.setForeground(QBrush(QColor("#2e7d32")))
+        else:
+            worker.pause()
+            if btn_pause:
+                btn_pause.setText("Resume")
+            status_item = self.table.item(row, 1)
+            if status_item:
+                status_item.setText("Paused")
+                status_item.setForeground(QBrush(QColor("#ef6c00")))
+            speed_item = self.table.item(row, 3)
+            if speed_item:
+                speed_item.setText("-")
+            eta_item = self.table.item(row, 4)
+            if eta_item:
+                eta_item.setText("Paused")
+
+        self.refresh_aggregates()
 
     def _pool_for_format(self, fmt) -> QThreadPool:
         """Audio tasks use the wide conversion pool; video stays bandwidth-capped."""
@@ -1228,14 +1270,14 @@ class MainWindow(QMainWindow):
         progress_bar = QProgressBar()
         progress_bar.setValue(0)
         
-        btn_cancel = self._make_cancel_button(task_id)
+        action_widget = self._make_action_widget(task_id)
         
         self.table.setItem(row_idx, 0, title_item)
         self.table.setItem(row_idx, 1, status_item)
         self.table.setCellWidget(row_idx, 2, progress_bar)
         self.table.setItem(row_idx, 3, speed_item)
         self.table.setItem(row_idx, 4, eta_item)
-        self.table.setCellWidget(row_idx, 5, btn_cancel)
+        self.table.setCellWidget(row_idx, 5, action_widget)
         
         self.row_mapping[task_id] = row_idx
 
@@ -1274,8 +1316,8 @@ class MainWindow(QMainWindow):
         self.table.item(row, 3).setText("-")
         self.table.item(row, 4).setText("-")
         
-        # Recreate and assign the Cancel button for the active process
-        self.table.setCellWidget(row, 5, self._make_cancel_button(task_id))
+        # Recreate and assign the action widget for the active process
+        self.table.setCellWidget(row, 5, self._make_action_widget(task_id))
         
         # Build and queue the new worker instance
         self._launch_download_worker(task_id, url, options)
@@ -1320,6 +1362,10 @@ class MainWindow(QMainWindow):
     def update_progress(self, task_id, data):
         row = self.row_mapping.get(task_id)
         if row is None: return
+
+        worker = self.active_workers.get(task_id)
+        if worker and worker.is_paused:
+            return
 
         if 'title' in data:
             self.table.item(row, 0).setText(data['title'])
