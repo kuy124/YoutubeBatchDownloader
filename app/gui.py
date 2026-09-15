@@ -1,4 +1,5 @@
 import os
+import sys
 import uuid
 import time
 import webbrowser
@@ -9,6 +10,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                                QHeaderView, QProgressBar, QMessageBox, QApplication, QScrollBar,
                                QGridLayout, QMenu, QSystemTrayIcon, QStyle, QDialog, QFormLayout,
                                QScrollArea, QGroupBox)
+from PySide6.QtWidgets import QInputDialog, QProgressDialog
 from PySide6.QtCore import QThreadPool, Qt, QTimer
 from PySide6.QtGui import (QBrush, QColor, QIcon, QTextCharFormat, QTextCursor,
                            QKeySequence, QShortcut, QAction)
@@ -30,9 +32,28 @@ from .downloader import DownloadWorker, TitlePreviewWorker
 from .logger import log
 from .themes import THEMES, THEME_DESCRIPTIONS, build_theme
 from .updater import APP_VERSION, UpdateWorker
-from .utils import extract_http_links, format_elapsed_words, format_hms, get_icon_path, is_youtube_url
+from .app_update import AppUpdateDownloadWorker, launch_replacement
+from .ytdlp_updater import get_runtime_status
+from .utils import (
+    extract_http_links,
+    format_elapsed_words,
+    format_hms,
+    get_icon_path,
+    is_youtube_url,
+    output_extension_for_format,
+    sanitize_output_stem,
+)
 from .widgets import DesktopToast
 from .win_taskbar import WinTaskbarProgress
+
+
+COL_TITLE = 0
+COL_OUTPUT_NAME = 1
+COL_STATUS = 2
+COL_PROGRESS = 3
+COL_SPEED = 4
+COL_ETA = 5
+COL_ACTIONS = 6
 
 
 class NoScrollComboBox(QComboBox):
@@ -71,6 +92,10 @@ class MainWindow(QMainWindow):
         self.active_metrics = {}    # Tracks realtime speed, bytes left, and ETA per worker
         self.extraction_samples = []  # Rolling window of measured extraction durations
         self.batch_start_time = None
+        self._editing_output_name = False
+        self._pending_app_update = None
+        self._app_update_worker = None
+        self._app_update_progress = None
 
         self.preview_timer = QTimer()
         self.preview_timer.setSingleShot(True)
@@ -135,7 +160,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """Optionally confirms exit mid-batch, persists the link list, then drains
         background pools so interpreter shutdown never races live worker threads."""
-        if (self.chk_confirm_exit.isChecked() and self.active_workers
+        if (self.chk_confirm_exit.isChecked() and self._has_unfinished_tasks()
                 and not self._confirm_close_with_downloads()):
             event.ignore()
             return
@@ -163,12 +188,19 @@ class MainWindow(QMainWindow):
         reply = QMessageBox.question(
             self,
             "Downloads in Progress",
-            f"{len(self.active_workers)} download(s) are running or waiting in the queue.\n\n"
+            f"{sum(1 for item in self.task_data.values() if item.get('state') in ('ready', 'running'))} "
+            "download(s) are ready, running, or waiting.\n\n"
             "Close anyway and cancel them?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
         return reply == QMessageBox.Yes
+
+    def _has_unfinished_tasks(self) -> bool:
+        return any(
+            info.get('state') in ('ready', 'running')
+            for info in self.task_data.values()
+        )
 
     def check_for_updates(self, manual: bool = False):
         worker = UpdateWorker(APP_VERSION, manual=manual)
@@ -177,17 +209,98 @@ class MainWindow(QMainWindow):
         worker.signals.error.connect(self.on_update_error)
         self.threadpool.start(worker)
 
-    def on_update_available(self, latest_ver: str, url: str):
+    def on_update_available(self, release: dict):
+        latest_ver = release['version']
         reply = QMessageBox.question(
             self,
             "Update Available",
             f"A new version ({latest_ver}) of YouTube Batch Downloader is available!\n\n"
-            f"Would you like to open GitHub to download the update?",
+            "Download, verify, install, and restart automatically?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.Yes
         )
         if reply == QMessageBox.Yes:
-            webbrowser.open(url)
+            if not getattr(sys, 'frozen', False):
+                QMessageBox.information(
+                    self,
+                    "Packaged App Required",
+                    "Automatic replacement is available in the packaged EXE. "
+                    "The release page will open so this source checkout is not overwritten.",
+                )
+                if release.get('html_url'):
+                    webbrowser.open(release['html_url'])
+                return
+            self.download_app_update(release)
+
+    def download_app_update(self, release: dict):
+        progress = QProgressDialog("Downloading application update...", "Cancel", 0, 100, self)
+        progress.setWindowTitle(f"Installing {release['version']}")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+
+        worker = AppUpdateDownloadWorker(release, sys.executable)
+        worker.signals.progress.connect(self.on_app_update_progress)
+        worker.signals.staged.connect(self.on_app_update_staged)
+        worker.signals.cancelled.connect(self.on_app_update_cancelled)
+        worker.signals.error.connect(self.on_app_update_download_error)
+        progress.canceled.connect(worker.cancel)
+
+        self._app_update_progress = progress
+        self._app_update_worker = worker
+        self.threadpool.start(worker)
+
+    def on_app_update_progress(self, received: int, total: int):
+        if not self._app_update_progress:
+            return
+        if total > 0:
+            self._app_update_progress.setValue(min(100, int(received * 100 / total)))
+            self._app_update_progress.setLabelText(
+                f"Downloading application update... {received / 1048576:.1f} of {total / 1048576:.1f} MB")
+        else:
+            self._app_update_progress.setRange(0, 0)
+            self._app_update_progress.setLabelText(
+                f"Downloading application update... {received / 1048576:.1f} MB")
+
+    def _close_app_update_progress(self):
+        if self._app_update_progress:
+            self._app_update_progress.close()
+            self._app_update_progress.deleteLater()
+        self._app_update_progress = None
+        self._app_update_worker = None
+
+    def on_app_update_staged(self, staged_path: str, version: str):
+        self._close_app_update_progress()
+        self._pending_app_update = {'path': staged_path, 'version': version}
+        if self._has_unfinished_tasks():
+            QMessageBox.information(
+                self,
+                "Update Ready",
+                "The verified update is ready. It will install after all Ready and running items finish or are removed.",
+            )
+            return
+        self.install_pending_app_update()
+
+    def on_app_update_cancelled(self):
+        self._close_app_update_progress()
+        self.statusBar.showMessage("Application update cancelled.", 6000)
+
+    def on_app_update_download_error(self, message: str):
+        self._close_app_update_progress()
+        QMessageBox.warning(self, "Update Download Failed", message)
+
+    def install_pending_app_update(self):
+        if not self._pending_app_update or self._has_unfinished_tasks():
+            return
+        pending = self._pending_app_update
+        try:
+            launch_replacement(pending['path'], pending['version'])
+        except Exception as exc:
+            QMessageBox.warning(self, "Update Installation Failed", str(exc))
+            return
+        self._pending_app_update = None
+        QApplication.quit()
 
     def on_no_update(self, manual: bool):
         if manual:
@@ -445,12 +558,21 @@ class MainWindow(QMainWindow):
 
         # Section 4: Application Updates
         self.grp_updates = QGroupBox("Updates")
-        updates_lay = QHBoxLayout(self.grp_updates)
-        updates_lay.addWidget(QLabel(f"Current Version: {APP_VERSION}"))
-        updates_lay.addStretch()
+        updates_lay = QVBoxLayout(self.grp_updates)
+        update_header = QHBoxLayout()
+        update_header.addWidget(QLabel(f"Application: {APP_VERSION}"))
+        update_header.addStretch()
         btn_check_updates = QPushButton("Check for Updates...")
         btn_check_updates.clicked.connect(lambda: self.check_for_updates(manual=True))
-        updates_lay.addWidget(btn_check_updates)
+        update_header.addWidget(btn_check_updates)
+        updates_lay.addLayout(update_header)
+        ytdlp_status = get_runtime_status()
+        self.lbl_ytdlp_version = QLabel(
+            f"yt-dlp: {ytdlp_status.get('active_version', 'Bundled')}\n"
+            f"{ytdlp_status.get('last_result', 'Not checked yet')}"
+        )
+        self.lbl_ytdlp_version.setWordWrap(True)
+        updates_lay.addWidget(self.lbl_ytdlp_version)
         content_lay.addWidget(self.grp_updates)
 
         self.settings_scroll.setWidget(scroll_content)
@@ -468,49 +590,64 @@ class MainWindow(QMainWindow):
         self.combo_boost.currentTextChanged.connect(lambda _: self._update_options_chip_text())
 
         # ---------------- Main Action Bar ----------------
-        action_layout = QHBoxLayout()
+        action_layout = QVBoxLayout()
+        utility_layout = QHBoxLayout()
+        queue_layout = QHBoxLayout()
 
         self.btn_options = QPushButton()
         self.btn_options.setProperty("variant", "chip")
         self.btn_options.setCursor(Qt.PointingHandCursor)
         self.btn_options.clicked.connect(self.open_download_options)
         self._update_options_chip_text()
-        action_layout.addWidget(self.btn_options)
+        utility_layout.addWidget(self.btn_options)
 
         self.btn_settings = QPushButton("Settings")
         self.btn_settings.setProperty("variant", "chip")
         self.btn_settings.setCursor(Qt.PointingHandCursor)
         self.btn_settings.clicked.connect(lambda: self.open_settings(scroll_to_format=False))
-        action_layout.addWidget(self.btn_settings)
+        utility_layout.addWidget(self.btn_settings)
 
         btn_open_folder = QPushButton("Open Folder")
         btn_open_folder.setProperty("variant", "chip")
         btn_open_folder.setCursor(Qt.PointingHandCursor)
         btn_open_folder.clicked.connect(self.open_downloads_folder)
-        action_layout.addWidget(btn_open_folder)
+        utility_layout.addWidget(btn_open_folder)
 
-        action_layout.addStretch()
+        utility_layout.addStretch()
 
-        btn_download = QPushButton("Add to Queue and Download")
-        btn_download.setProperty("variant", "primary")
-        btn_download.clicked.connect(self.start_downloads)
-        action_layout.addWidget(btn_download)
+        btn_add_queue = QPushButton("Add to Queue")
+        btn_add_queue.setProperty("variant", "primary")
+        btn_add_queue.setToolTip("Add the current links without starting them (Ctrl+Enter)")
+        btn_add_queue.clicked.connect(self.add_links_to_queue)
+        queue_layout.addStretch()
+        queue_layout.addWidget(btn_add_queue)
+
+        btn_start_queue = QPushButton("Start Queue")
+        btn_start_queue.setProperty("variant", "primary")
+        btn_start_queue.setToolTip("Start every item marked Ready (Ctrl+Shift+Enter)")
+        btn_start_queue.clicked.connect(self.start_queue)
+        queue_layout.addWidget(btn_start_queue)
 
         btn_cancel_all = QPushButton("Cancel All")
         btn_cancel_all.setProperty("variant", "danger")
         btn_cancel_all.clicked.connect(self.cancel_all_tasks)
-        action_layout.addWidget(btn_cancel_all)
+        queue_layout.addWidget(btn_cancel_all)
 
         btn_clear_completed = QPushButton("Clear Completed")
         btn_clear_completed.clicked.connect(self.clear_completed_tasks)
-        action_layout.addWidget(btn_clear_completed)
+        queue_layout.addWidget(btn_clear_completed)
 
+        action_layout.addLayout(utility_layout)
+        action_layout.addLayout(queue_layout)
         layout.addLayout(action_layout)
 
-        # Keyboard shortcut: Ctrl+Enter / Ctrl+Return starts the queue instantly
+        # Queue shortcuts keep setup and execution as two deliberate steps.
         for seq in ("Ctrl+Return", "Ctrl+Enter"):
             start_shortcut = QShortcut(QKeySequence(seq), self)
-            start_shortcut.activated.connect(self.start_downloads)
+            start_shortcut.activated.connect(self.add_links_to_queue)
+        for seq in ("Ctrl+Shift+Return", "Ctrl+Shift+Enter"):
+            run_shortcut = QShortcut(QKeySequence(seq), self)
+            run_shortcut.activated.connect(self.start_queue)
 
         # ---------------- Search Bar & Queue Table ----------------
         search_layout = QHBoxLayout()
@@ -521,15 +658,19 @@ class MainWindow(QMainWindow):
         search_layout.addWidget(self.search_input)
         layout.addLayout(search_layout)
 
-        self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["Video Title", "Status", "Progress", "Speed", "ETA", "Actions"])
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.table.setColumnWidth(1, 115)
-        self.table.setColumnWidth(2, 95)
-        self.table.setColumnWidth(3, 145)
-        self.table.setColumnWidth(4, 85)
-        self.table.setColumnWidth(5, 150)
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(
+            ["Video Title", "Output Name", "Status", "Progress", "Speed", "ETA", "Actions"])
+        self.table.horizontalHeader().setSectionResizeMode(COL_TITLE, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(COL_OUTPUT_NAME, QHeaderView.Stretch)
+        self.table.setColumnWidth(COL_STATUS, 115)
+        self.table.setColumnWidth(COL_PROGRESS, 95)
+        self.table.setColumnWidth(COL_SPEED, 145)
+        self.table.setColumnWidth(COL_ETA, 85)
+        self.table.setColumnWidth(COL_ACTIONS, 150)
+        self.table.setEditTriggers(
+            QTableWidget.DoubleClicked | QTableWidget.EditKeyPressed)
+        self.table.itemChanged.connect(self.on_table_item_changed)
         
         # Connect double-click on cells to run instant playback
         self.table.cellDoubleClicked.connect(self.on_table_double_clicked)
@@ -773,7 +914,7 @@ class MainWindow(QMainWindow):
         self.url_input.setPlainText("\n".join(links))
         self.desktop_toast.show_notification(
             "Clipboard Loaded",
-            f"{len(links)} YouTube link{'s' if len(links) != 1 else ''} ready — Ctrl+Enter to download",
+            f"{len(links)} YouTube link{'s' if len(links) != 1 else ''} ready. Ctrl+Enter adds them to the queue.",
             3200
         )
 
@@ -816,7 +957,7 @@ class MainWindow(QMainWindow):
             self.url_input.setPlainText("\n".join(current_lines + added))
             self.desktop_toast.show_notification(
                 "Links Added",
-                f"{len(added)} link{'s' if len(added) != 1 else ''} appended — press Ctrl+Enter to download",
+                f"{len(added)} link{'s' if len(added) != 1 else ''} appended. Press Ctrl+Enter to queue them.",
                 2800
             )
         event.acceptProposedAction()
@@ -830,7 +971,7 @@ class MainWindow(QMainWindow):
         if not task_id:
             return
 
-        status_item = self.table.item(row, 1)
+        status_item = self.table.item(row, COL_STATUS)
         status_text = status_item.text() if status_item else ""
         file_path = self.completed_paths.get(task_id)
 
@@ -842,11 +983,14 @@ class MainWindow(QMainWindow):
             menu.addSeparator()
 
         act_copy = menu.addAction("Copy URL")
-        act_retry = act_cancel = act_pause = None
+        act_retry = act_cancel = act_pause = act_rename = None
+        task_state = self.task_data.get(task_id, {}).get('state')
         if status_text == "Complete":
             pass
         elif "Failed" in status_text:
             act_retry = menu.addAction("Retry Download")
+        elif task_state == 'ready':
+            act_rename = menu.addAction("Rename Output")
         else:
             worker = self.active_workers.get(task_id)
             is_paused = getattr(worker, 'is_paused', False) if worker else False
@@ -867,6 +1011,8 @@ class MainWindow(QMainWindow):
         elif chosen == act_copy:
             url = self.task_data.get(task_id, {}).get('url', '')
             QApplication.clipboard().setText(url)
+        elif chosen == act_rename:
+            self.rename_task(task_id)
         elif chosen == act_pause:
             self.toggle_pause_task(task_id)
         elif chosen == act_retry:
@@ -886,10 +1032,16 @@ class MainWindow(QMainWindow):
             self.global_progress.setValue(0)
             self.global_progress.setFormat("No active tasks")
             return
+        if not self.active_workers:
+            ready = len(self._ready_task_ids())
+            self.global_progress.setValue(0)
+            self.global_progress.setFormat(
+                f"{ready} item{'s' if ready != 1 else ''} ready" if ready else "No active tasks")
+            return
 
         total_percentage = 0
         for row in range(total_rows):
-            progress_widget = self.table.cellWidget(row, 2)
+            progress_widget = self.table.cellWidget(row, COL_PROGRESS)
             if isinstance(progress_widget, QProgressBar):
                 total_percentage += progress_widget.value()
 
@@ -910,10 +1062,14 @@ class MainWindow(QMainWindow):
         for row in range(self.table.rowCount()):
             task_id = self._row_to_task_id(row)
             
-            title = self.table.item(row, 0).text() if self.table.item(row, 0) else ""
+            title = self.table.item(row, COL_TITLE).text() if self.table.item(row, COL_TITLE) else ""
+            output_name = (
+                self.table.item(row, COL_OUTPUT_NAME).text()
+                if self.table.item(row, COL_OUTPUT_NAME) else ""
+            )
             url = self.task_data.get(task_id, {}).get('url', '') if task_id else ""
             
-            if not query or query in title.lower() or query in url.lower():
+            if not query or query in title.lower() or query in output_name.lower() or query in url.lower():
                 self.table.setRowHidden(row, False)
             else:
                 self.table.setRowHidden(row, True)
@@ -946,7 +1102,7 @@ class MainWindow(QMainWindow):
 
         completed_ids = [
             tid for tid, row in list(self.row_mapping.items())
-            if self.table.item(row, 1) and self.table.item(row, 1).text() == "Complete"
+            if self.table.item(row, COL_STATUS) and self.table.item(row, COL_STATUS).text() == "Complete"
         ]
         
         active_or_queued_ids = [
@@ -1009,7 +1165,7 @@ class MainWindow(QMainWindow):
         completed = 0
         failed = 0
         for row in range(total):
-            item = self.table.item(row, 1)
+            item = self.table.item(row, COL_STATUS)
             if item:
                 status = item.text()
                 if status == "Complete":
@@ -1090,7 +1246,7 @@ class MainWindow(QMainWindow):
 
         completed = failed = 0
         for row in range(self.table.rowCount()):
-            item = self.table.item(row, 1)
+            item = self.table.item(row, COL_STATUS)
             if not item:
                 continue
             status_text = item.text()
@@ -1100,7 +1256,7 @@ class MainWindow(QMainWindow):
                 failed += 1
 
         if failed > 0:
-            tray_title = f"Batch Finished — {failed} Failed"
+            tray_title = f"Batch Finished: {failed} Failed"
             tray_body = f"{completed} downloaded successfully, {failed} failed."
             tray_icon = QSystemTrayIcon.Warning
         else:
@@ -1113,7 +1269,7 @@ class MainWindow(QMainWindow):
         if not self.isActiveWindow():
             QApplication.alert(self, 2000)
 
-    def start_downloads(self):
+    def add_links_to_queue(self):
         raw_url_lines = self.url_input.toPlainText().split('\n')
         raw_preview_lines = self.preview_input.toPlainText().split('\n')
 
@@ -1154,7 +1310,6 @@ class MainWindow(QMainWindow):
                 2600
             )
 
-        self.batch_start_time = time.time()
         os.makedirs(self.entry_path.text(), exist_ok=True)
         self.save_current_settings()
 
@@ -1164,11 +1319,142 @@ class MainWindow(QMainWindow):
             'quality': self.combo_quality.currentText(),
             'audio_boost': self.combo_boost.currentText(),
             'use_aria2': bool(self.settings.get("use_aria2", False)),
-            'queued_time': self.batch_start_time
+            'queued_time': None
         }
 
         for url, cached_title in unique_entries:
             self.add_task(url, options, title=cached_title)
+        self.url_input.clear()
+        self.preview_input.clear()
+
+    def start_downloads(self):
+        """Compatibility alias for integrations that used the previous action name."""
+        self.add_links_to_queue()
+
+    def _ready_task_ids(self):
+        return [
+            task_id for task_id, info in self.task_data.items()
+            if info.get('state') == 'ready' and task_id in self.row_mapping
+        ]
+
+    def _custom_output_conflicts(self, task_ids: list[str]) -> list[str]:
+        seen = {}
+        conflicts = []
+
+        # A running item may not have created its final file yet, so reserve its
+        # requested path while validating the next group of Ready items.
+        for other_id, other_info in self.task_data.items():
+            if other_id in task_ids or other_info.get('state') != 'running':
+                continue
+            other_name = other_info.get('output_name') or ''
+            if not other_name:
+                continue
+            other_options = other_info['options']
+            other_extension = output_extension_for_format(other_options.get('format') or '')
+            other_target = os.path.abspath(os.path.join(
+                other_options.get('download_path') or '', other_name + other_extension))
+            seen[os.path.normcase(other_target)] = other_id
+
+        for task_id in task_ids:
+            info = self.task_data[task_id]
+            output_name = info.get('output_name') or ''
+            if not output_name:
+                continue
+            options = info['options']
+            extension = output_extension_for_format(options.get('format') or '')
+            target = os.path.abspath(os.path.join(
+                options.get('download_path') or '', output_name + extension))
+            key = os.path.normcase(target)
+            if key in seen:
+                conflicts.append(f'"{output_name}" is used by more than one queued item.')
+            else:
+                seen[key] = task_id
+            if os.path.exists(target):
+                conflicts.append(f'"{output_name + extension}" already exists.')
+        return list(dict.fromkeys(conflicts))
+
+    def start_queue(self):
+        task_ids = self._ready_task_ids()
+        if not task_ids:
+            QMessageBox.information(self, "Start Queue", "No items are ready to download.")
+            return
+
+        conflicts = self._custom_output_conflicts(task_ids)
+        if conflicts:
+            QMessageBox.warning(
+                self,
+                "Rename Required",
+                "Resolve these output-name conflicts before starting:\n\n" + "\n".join(conflicts[:8]),
+            )
+            return
+
+        self.batch_start_time = time.time()
+        for task_id in task_ids:
+            info = self.task_data[task_id]
+            row = self.row_mapping[task_id]
+            info['state'] = 'running'
+            info['options']['queued_time'] = self.batch_start_time
+            info['options']['output_name'] = info.get('output_name') or ''
+            output_item = self.table.item(row, COL_OUTPUT_NAME)
+            if output_item:
+                output_item.setFlags(output_item.flags() & ~Qt.ItemIsEditable)
+            status_item = self.table.item(row, COL_STATUS)
+            status_item.setText("Waiting in Queue...")
+            status_item.setForeground(QBrush())
+            self.table.setCellWidget(row, COL_ACTIONS, self._make_action_widget(task_id))
+            pre_data = info.get('pre_data') or {'title': info.get('original_title') or 'Downloading...'}
+            self._launch_download_worker(task_id, info['url'], info['options'], pre_data)
+        self.refresh_aggregates()
+        if self._pending_app_update and not self._has_unfinished_tasks():
+            QTimer.singleShot(0, self.install_pending_app_update)
+
+    def rename_task(self, task_id: str):
+        info = self.task_data.get(task_id)
+        row = self.row_mapping.get(task_id)
+        if not info or row is None or info.get('state') != 'ready':
+            return
+        value, accepted = QInputDialog.getText(
+            self,
+            "Rename Output",
+            "Filename without extension (leave empty to use the video title):",
+            text=info.get('output_name') or '',
+        )
+        if not accepted:
+            return
+        clean_value = sanitize_output_stem(value, info['options'].get('format') or '')
+        self._editing_output_name = True
+        self.table.item(row, COL_OUTPUT_NAME).setText(clean_value)
+        self._editing_output_name = False
+        info['output_name'] = clean_value
+
+    def on_table_item_changed(self, item):
+        if self._editing_output_name or item.column() != COL_OUTPUT_NAME:
+            return
+        task_id = self._row_to_task_id(item.row())
+        info = self.task_data.get(task_id)
+        if not info:
+            return
+        if info.get('state') != 'ready':
+            self._editing_output_name = True
+            item.setText(info.get('output_name') or '')
+            self._editing_output_name = False
+            return
+        clean_value = sanitize_output_stem(item.text(), info['options'].get('format') or '')
+        info['output_name'] = clean_value
+        if clean_value != item.text():
+            self._editing_output_name = True
+            item.setText(clean_value)
+            self._editing_output_name = False
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_F2 and self.table.hasFocus():
+            row = self.table.currentRow()
+            task_id = self._row_to_task_id(row)
+            if task_id and self.task_data.get(task_id, {}).get('state') == 'ready':
+                self.table.setCurrentCell(row, COL_OUTPUT_NAME)
+                self.table.editItem(self.table.item(row, COL_OUTPUT_NAME))
+                return
+        super().keyPressEvent(event)
 
     def _make_action_widget(self, task_id: str) -> QWidget:
         """Builds an action container with Pause and Cancel buttons."""
@@ -1190,8 +1476,25 @@ class MainWindow(QMainWindow):
 
         return container
 
+    def _make_ready_action_widget(self, task_id: str) -> QWidget:
+        container = QWidget()
+        lay = QHBoxLayout(container)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+
+        btn_rename = QPushButton("Rename")
+        btn_rename.setProperty("variant", "cell")
+        btn_rename.clicked.connect(lambda _, tid=task_id: self.rename_task(tid))
+        lay.addWidget(btn_rename)
+
+        btn_remove = QPushButton("Remove")
+        btn_remove.setProperty("variant", "cell")
+        btn_remove.clicked.connect(lambda _, tid=task_id: self.remove_task_row(tid))
+        lay.addWidget(btn_remove)
+        return container
+
     def _find_pause_button(self, row: int):
-        widget = self.table.cellWidget(row, 5)
+        widget = self.table.cellWidget(row, COL_ACTIONS)
         if widget:
             return widget.findChild(QPushButton, "btn_pause")
         return None
@@ -1208,7 +1511,7 @@ class MainWindow(QMainWindow):
             worker.resume()
             if btn_pause:
                 btn_pause.setText("Pause")
-            status_item = self.table.item(row, 1)
+            status_item = self.table.item(row, COL_STATUS)
             if status_item:
                 status_item.setText("Downloading")
                 status_item.setForeground(QBrush(QColor("#2e7d32")))
@@ -1216,14 +1519,14 @@ class MainWindow(QMainWindow):
             worker.pause()
             if btn_pause:
                 btn_pause.setText("Resume")
-            status_item = self.table.item(row, 1)
+            status_item = self.table.item(row, COL_STATUS)
             if status_item:
                 status_item.setText("Paused")
                 status_item.setForeground(QBrush(QColor("#ef6c00")))
-            speed_item = self.table.item(row, 3)
+            speed_item = self.table.item(row, COL_SPEED)
             if speed_item:
                 speed_item.setText("-")
-            eta_item = self.table.item(row, 4)
+            eta_item = self.table.item(row, COL_ETA)
             if eta_item:
                 eta_item.setText("Paused")
 
@@ -1253,10 +1556,13 @@ class MainWindow(QMainWindow):
 
     def add_task(self, url, options, title=None):
         task_id = str(uuid.uuid4())
-        
+        options_snapshot = dict(options)
         self.task_data[task_id] = {
             'url': url,
-            'options': options
+            'options': options_snapshot,
+            'state': 'ready',
+            'original_title': title or '',
+            'output_name': '',
         }
 
         # Add Row to UI Table
@@ -1264,26 +1570,28 @@ class MainWindow(QMainWindow):
         self.table.insertRow(row_idx)
         
         display_title = title if title else f"Extracting: {url}"
-        status_text = "Waiting in Queue..." if title else "Extracting Metadata..."
-        status_color = "#2e7d32" if title else "#1565c0"
+        status_text = "Ready"
 
         title_item = QTableWidgetItem(display_title)
+        output_item = QTableWidgetItem("")
+        output_item.setToolTip("Double-click or press F2 to set a custom filename. Empty uses the video title.")
+        output_item.setFlags(output_item.flags() | Qt.ItemIsEditable)
         status_item = QTableWidgetItem(status_text)
-        status_item.setForeground(QBrush(QColor(status_color)))
         speed_item = QTableWidgetItem("-")
         eta_item = QTableWidgetItem("-")
         
         progress_bar = QProgressBar()
         progress_bar.setValue(0)
         
-        action_widget = self._make_action_widget(task_id)
+        action_widget = self._make_ready_action_widget(task_id)
         
-        self.table.setItem(row_idx, 0, title_item)
-        self.table.setItem(row_idx, 1, status_item)
-        self.table.setCellWidget(row_idx, 2, progress_bar)
-        self.table.setItem(row_idx, 3, speed_item)
-        self.table.setItem(row_idx, 4, eta_item)
-        self.table.setCellWidget(row_idx, 5, action_widget)
+        self.table.setItem(row_idx, COL_TITLE, title_item)
+        self.table.setItem(row_idx, COL_OUTPUT_NAME, output_item)
+        self.table.setItem(row_idx, COL_STATUS, status_item)
+        self.table.setCellWidget(row_idx, COL_PROGRESS, progress_bar)
+        self.table.setItem(row_idx, COL_SPEED, speed_item)
+        self.table.setItem(row_idx, COL_ETA, eta_item)
+        self.table.setCellWidget(row_idx, COL_ACTIONS, action_widget)
         
         self.row_mapping[task_id] = row_idx
 
@@ -1291,8 +1599,6 @@ class MainWindow(QMainWindow):
         pre_title = title if title else f"Downloading..."
         pre_data = {'title': pre_title}
         self.task_data[task_id]['pre_data'] = pre_data
-
-        self._launch_download_worker(task_id, url, options, pre_data)
 
         self.filter_table(self.search_input.text())
         self.refresh_aggregates()
@@ -1314,19 +1620,22 @@ class MainWindow(QMainWindow):
         task_info = self.task_data[task_id]
         url = task_info['url']
         options = task_info['options']
+        task_info['state'] = 'running'
+        options['output_name'] = task_info.get('output_name') or ''
         
         # Reset row aesthetics to standard active download state
-        self.table.item(row, 1).setText("Waiting...")
-        self.table.item(row, 1).setForeground(QBrush())  # Reset foreground brush to default
-        self.table.cellWidget(row, 2).setValue(0)
-        self.table.item(row, 3).setText("-")
-        self.table.item(row, 4).setText("-")
+        self.table.item(row, COL_STATUS).setText("Waiting...")
+        self.table.item(row, COL_STATUS).setForeground(QBrush())
+        self.table.cellWidget(row, COL_PROGRESS).setValue(0)
+        self.table.item(row, COL_SPEED).setText("-")
+        self.table.item(row, COL_ETA).setText("-")
         
         # Recreate and assign the action widget for the active process
-        self.table.setCellWidget(row, 5, self._make_action_widget(task_id))
+        self.table.setCellWidget(row, COL_ACTIONS, self._make_action_widget(task_id))
         
         # Build and queue the new worker instance
-        self._launch_download_worker(task_id, url, options)
+        pre_data = task_info.get('pre_data')
+        self._launch_download_worker(task_id, url, options, pre_data)
         self.refresh_aggregates()
 
     def remove_task_row(self, task_id):
@@ -1354,11 +1663,13 @@ class MainWindow(QMainWindow):
                 self.row_mapping[tid] = r_idx - 1
 
         self.refresh_aggregates()
+        if self._pending_app_update and not self._has_unfinished_tasks():
+            QTimer.singleShot(0, self.install_pending_app_update)
 
     def clear_completed_tasks(self):
         completed_ids = []
         for tid, row in list(self.row_mapping.items()):
-            item = self.table.item(row, 1)
+            item = self.table.item(row, COL_STATUS)
             if item and item.text() == "Complete":
                 completed_ids.append(tid)
                 
@@ -1374,22 +1685,24 @@ class MainWindow(QMainWindow):
             return
 
         if 'title' in data:
-            self.table.item(row, 0).setText(data['title'])
+            self.table.item(row, COL_TITLE).setText(data['title'])
+            if task_id in self.task_data:
+                self.task_data[task_id]['original_title'] = data['title']
             
         if 'status_text' in data:
             status = data['status_text']
-            self.table.item(row, 1).setText(status)
+            self.table.item(row, COL_STATUS).setText(status)
             
             # Dynamic loading status text color indicators
             if "Analyzing" in status or "Extracting" in status or "Converting" in status or "Merging" in status or "Embedding" in status:
-                self.table.item(row, 1).setForeground(QBrush(QColor("#8e24aa")))  # Extraction Purple
+                self.table.item(row, COL_STATUS).setForeground(QBrush(QColor("#8e24aa")))
             elif "Retrying" in status:
-                self.table.item(row, 1).setForeground(QBrush(QColor("#ef6c00")))  # Warning Orange
+                self.table.item(row, COL_STATUS).setForeground(QBrush(QColor("#ef6c00")))
             elif "Downloading" in status or "Extracted" in status:
-                self.table.item(row, 1).setForeground(QBrush(QColor("#2e7d32")))  # Progress Green
+                self.table.item(row, COL_STATUS).setForeground(QBrush(QColor("#2e7d32")))
 
         # Switch progress bar between Download % and Animated Extraction Pulse
-        progress_bar = self.table.cellWidget(row, 2)
+        progress_bar = self.table.cellWidget(row, COL_PROGRESS)
         if isinstance(progress_bar, QProgressBar):
             if data.get('is_postprocessing'):
                 progress_bar.setRange(0, 0)  # Indeterminate animated pulse mode
@@ -1406,9 +1719,9 @@ class MainWindow(QMainWindow):
                         pass
             
         if 'speed' in data:
-            self.table.item(row, 3).setText(data['speed'])
+            self.table.item(row, COL_SPEED).setText(data['speed'])
         if 'eta' in data:
-            self.table.item(row, 4).setText(data['eta'])
+            self.table.item(row, COL_ETA).setText(data['eta'])
 
         # Collect real extraction durations reported by workers for future ETA estimates
         if 'extraction_time' in data:
@@ -1430,21 +1743,23 @@ class MainWindow(QMainWindow):
         row = self.row_mapping.get(task_id)
         if row is None: return  # Safe exit if row was already removed/cancelled
 
-        self.table.item(row, 1).setText("Complete")
-        self.table.item(row, 1).setForeground(QBrush(QColor("#2e7d32")))  # Solid Success Green
+        if task_id in self.task_data:
+            self.task_data[task_id]['state'] = 'complete'
+        self.table.item(row, COL_STATUS).setText("Complete")
+        self.table.item(row, COL_STATUS).setForeground(QBrush(QColor("#2e7d32")))
         
         # Reset progress bar to standard 100% format
-        progress_bar = self.table.cellWidget(row, 2)
+        progress_bar = self.table.cellWidget(row, COL_PROGRESS)
         if isinstance(progress_bar, QProgressBar):
             progress_bar.setRange(0, 100)
             progress_bar.setValue(100)
             progress_bar.setFormat("100%")
 
-        self.table.item(row, 3).setText("-")
+        self.table.item(row, COL_SPEED).setText("-")
         if elapsed_str:
-            self.table.item(row, 4).setText(f"Done in {elapsed_str}")
+            self.table.item(row, COL_ETA).setText(f"Done in {elapsed_str}")
         else:
-            self.table.item(row, 4).setText("-")
+            self.table.item(row, COL_ETA).setText("-")
         
         # Cache file path for double-click playback functionality
         self.completed_paths[task_id] = file_path
@@ -1453,7 +1768,7 @@ class MainWindow(QMainWindow):
         btn_open = QPushButton("Open File")
         btn_open.setProperty("variant", "cell-primary")
         btn_open.clicked.connect(lambda _, fp=file_path: self.open_file(fp))
-        self.table.setCellWidget(row, 5, btn_open)
+        self.table.setCellWidget(row, COL_ACTIONS, btn_open)
         
         self.refresh_aggregates()
 
@@ -1477,19 +1792,23 @@ class MainWindow(QMainWindow):
             self.statusBar.showMessage(completion_msg, 10000)
             
         log.info(f"Task {task_id} completed: {completion_msg}. Path: {file_path}")
+        if self._pending_app_update and not self._has_unfinished_tasks():
+            QTimer.singleShot(0, self.install_pending_app_update)
 
     def task_error(self, task_id, error_msg):
         row = self.row_mapping.get(task_id)
         if row is None: return  # Safe exit if row was already removed/cancelled
 
-        self.table.item(row, 1).setText(error_msg)
-        self.table.item(row, 1).setForeground(QBrush(QColor("#d32f2f")))  # Soft red for error text
+        if task_id in self.task_data:
+            self.task_data[task_id]['state'] = 'failed'
+        self.table.item(row, COL_STATUS).setText(error_msg)
+        self.table.item(row, COL_STATUS).setForeground(QBrush(QColor("#d32f2f")))
         
         # Replace the Cancel button with a highly visible "Retry" button
         btn_retry = QPushButton("Retry")
         btn_retry.setProperty("variant", "cell-danger")
         btn_retry.clicked.connect(lambda _, tid=task_id: self.retry_task(tid))
-        self.table.setCellWidget(row, 5, btn_retry)
+        self.table.setCellWidget(row, COL_ACTIONS, btn_retry)
             
         self.refresh_aggregates()
         self._cleanup_worker(task_id)
@@ -1497,6 +1816,8 @@ class MainWindow(QMainWindow):
         # Play system sound notification if all active processing is finished (even on fail)
         if len(self.active_workers) == 0 and self.chk_completion_sound.isChecked():
             self.play_finished_sound()
+        if self._pending_app_update and not self._has_unfinished_tasks():
+            QTimer.singleShot(0, self.install_pending_app_update)
 
     def _cleanup_worker(self, task_id):
         if task_id in self.active_workers:

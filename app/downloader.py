@@ -10,6 +10,7 @@ from PySide6.QtCore import QRunnable, QObject, Signal
 from .utils import (
     build_audio_boost_filter,
     clean_youtube_url,
+    escape_yt_dlp_template_literal,
     fetch_oembed_title,
     format_display_title,
     format_elapsed_words,
@@ -20,6 +21,7 @@ from .utils import (
     insecure_ssl_context,
     is_youtube_url,
     resolve_uploader,
+    sanitize_output_stem,
 )
 from .logger import log
 from .converter import convert_m4a_to_mp3_fast, embed_wav_metadata
@@ -271,6 +273,15 @@ def extract_media_tags(info_dict: dict) -> tuple:
     return title, resolve_uploader(info_dict)
 
 
+def build_output_template(download_path: str, output_name: str, format_name: str) -> str:
+    """Builds an output template while keeping custom text literal."""
+    clean_name = sanitize_output_stem(output_name, format_name)
+    if not clean_name:
+        return os.path.join(download_path, '%(title)s.%(ext)s')
+    literal_name = escape_yt_dlp_template_literal(clean_name)
+    return os.path.join(download_path, f'{literal_name}.%(ext)s')
+
+
 class DownloadWorker(QRunnable):
     def __init__(self, task_id: str, url: str, options: dict, pre_data: dict = None):
         super().__init__()
@@ -421,6 +432,8 @@ class DownloadWorker(QRunnable):
         """Safely removes all incomplete, converted, thumbnail, and media files when a task is cancelled."""
         download_dir = self.options.get('download_path') or (os.path.dirname(filepath) if filepath else "")
         title = self.pre_data.get('title') or ""
+        output_name = sanitize_output_stem(
+            self.options.get('output_name') or "", self.options.get('format') or "")
         
         target_bases = []
         if filepath:
@@ -431,6 +444,8 @@ class DownloadWorker(QRunnable):
             clean_t = re.sub(r'[\\/:*?"<>|]', '_', title)
             if clean_t not in target_bases:
                 target_bases.append(clean_t)
+        if output_name and output_name not in target_bases:
+            target_bases.append(output_name)
 
         if not download_dir or not os.path.exists(download_dir) or not target_bases:
             return
@@ -442,7 +457,7 @@ class DownloadWorker(QRunnable):
                     continue
                     
                 for base in target_bases:
-                    if f.startswith(base):
+                    if f == base or f.startswith(base + '.'):
                         try:
                             os.remove(full_path)
                             log.info(f"Cleanup: Removed cancelled task file/residue: {full_path}")
@@ -686,7 +701,11 @@ class DownloadWorker(QRunnable):
                 os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
 
         ydl_opts = {
-            'outtmpl': os.path.join(self.options['download_path'], '%(title)s.%(ext)s'),
+            'outtmpl': build_output_template(
+                self.options['download_path'],
+                self.options.get('output_name') or "",
+                self.options.get('format') or "",
+            ),
             'parse_metadata': [
                 '%(uploader,channel,creator,artist)s:%(artist)s',
                 '%(uploader,channel,creator,artist)s:%(album_artist)s',

@@ -11,6 +11,9 @@ dist/
 # Runtime artifacts
 logs/
 downloads/
+backups/
+runtime/
+tests/runtime_tmp/
 
 # User-local config and binaries
 settings.json

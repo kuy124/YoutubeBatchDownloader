@@ -1,21 +1,41 @@
-import random
+import json
 import re
 import urllib.request
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
-from .utils import insecure_ssl_context
-
-APP_VERSION = "v1.9.1"
+APP_VERSION = "v1.9.2"
+RELEASE_API_URL = "https://api.github.com/repos/kuy124/YoutubeBatchDownloader/releases/latest"
+USER_AGENT = "YouTubeBatchDownloader-Updater"
 
 
 def parse_version(ver_str: str) -> tuple:
-    cleaned = re.sub(r'[^0-9.]', '', ver_str)
-    return tuple(map(int, cleaned.split('.'))) if cleaned else (0,)
+    parts = re.findall(r'\d+', ver_str or '')
+    return tuple(map(int, parts)) if parts else (0,)
+
+
+def select_windows_asset(assets: list) -> dict:
+    candidates = []
+    for asset in assets or []:
+        name = str(asset.get('name') or '')
+        lower = name.lower()
+        if "youtubebatchdownloader" not in lower:
+            continue
+        if lower.endswith('.zip'):
+            priority = 0
+        elif lower.endswith('.exe'):
+            priority = 1
+        else:
+            continue
+        if asset.get('browser_download_url'):
+            candidates.append((priority, lower, asset))
+    if not candidates:
+        raise ValueError("This release does not contain a Windows application asset.")
+    return min(candidates, key=lambda item: (item[0], item[1]))[2]
 
 
 class UpdateSignals(QObject):
-    update_available = Signal(str, str)
+    update_available = Signal(dict)
     no_update = Signal(bool)
     error = Signal(str)
 
@@ -28,33 +48,29 @@ class UpdateWorker(QRunnable):
         self.signals = UpdateSignals()
 
     def run(self):
-        # A list of standard browser profiles to rotate through (Dynamic User)
-        user_agents = [
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.1 Safari/605.1.15',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0',
-            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/117.0.2045.60'
-        ]
-
-        # Bypass API IP limits by hitting the frontend, and bypass bot-protection by rotating users
-        url = "https://github.com/kuy124/YoutubeBatchDownloader/releases/latest"
-        req = urllib.request.Request(url, headers={'User-Agent': random.choice(user_agents)})
+        req = urllib.request.Request(RELEASE_API_URL, headers={'User-Agent': USER_AGENT})
         try:
-            with urllib.request.urlopen(req, timeout=5, context=insecure_ssl_context()) as resp:
-                final_url = resp.geturl()
-                
-                # Extract the tag version directly from the redirected URL
-                if "releases/tag/" in final_url:
-                    tag_name = final_url.split("releases/tag/")[-1].split('/')[0]
-                    html_url = final_url
-                    
-                    if parse_version(tag_name) > parse_version(self.current_version):
-                        self.signals.update_available.emit(tag_name, html_url)
-                    else:
-                        self.signals.no_update.emit(self.manual)
-                else:
-                    raise Exception("Failed to parse release version from GitHub.")
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                release = json.loads(resp.read().decode('utf-8'))
+            tag_name = str(release.get('tag_name') or '')
+            if not tag_name:
+                raise ValueError("GitHub did not return a release version.")
+            if parse_version(tag_name) <= parse_version(self.current_version):
+                self.signals.no_update.emit(self.manual)
+                return
+
+            asset = select_windows_asset(release.get('assets') or [])
+            digest = str(asset.get('digest') or '')
+            if not digest.lower().startswith('sha256:'):
+                raise ValueError("The release asset does not provide a SHA-256 digest.")
+            self.signals.update_available.emit({
+                'version': tag_name,
+                'html_url': release.get('html_url') or '',
+                'asset_name': asset.get('name') or '',
+                'download_url': asset['browser_download_url'],
+                'size': int(asset.get('size') or 0),
+                'sha256': digest.split(':', 1)[1].lower(),
+            })
         except Exception as e:
             if self.manual:
                 self.signals.error.emit(str(e))

@@ -9,6 +9,27 @@ import urllib.request
 from urllib.parse import parse_qs, urlparse
 
 
+_WINDOWS_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+
+_FORMAT_EXTENSIONS = {
+    "Best Quality (MKV)": ".mkv",
+    "MP4 Video": ".mp4",
+    "WEBM Video": ".webm",
+    "AVI Video": ".avi",
+    "MOV Video": ".mov",
+    "MP3 Audio": ".mp3",
+    "M4A Audio": ".m4a",
+    "WAV Audio": ".wav",
+    "FLAC Audio": ".flac",
+    "AAC Audio": ".aac",
+    "OPUS Audio": ".opus",
+}
+
+
 def get_root_dir() -> str:
     """Returns the root directory of the application, handling PyInstaller environment."""
     if getattr(sys, 'frozen', False):
@@ -99,6 +120,36 @@ def extract_http_links(text: str) -> list:
         if token[:7].lower() == "http://" or token[:8].lower() == "https://":
             links.append(token)
     return links
+
+
+def output_extension_for_format(format_name: str) -> str:
+    """Returns the final extension produced by a configured output format."""
+    return _FORMAT_EXTENSIONS.get(format_name, "")
+
+
+def sanitize_output_stem(value: str, format_name: str = "", max_length: int = 180) -> str:
+    """Normalizes a user-provided filename stem for a portable Windows download."""
+    stem = (value or "").strip()
+    expected_ext = output_extension_for_format(format_name)
+    if expected_ext and stem.lower().endswith(expected_ext):
+        stem = stem[:-len(expected_ext)]
+
+    stem = re.sub(r'[\x00-\x1f<>:"/\\|?*]', '_', stem)
+    stem = stem.rstrip(' .')
+    if not stem:
+        return ""
+
+    if stem.split('.', 1)[0].upper() in _WINDOWS_RESERVED_NAMES:
+        stem += "_"
+
+    if len(stem) > max_length:
+        stem = stem[:max_length].rstrip(' .')
+    return stem
+
+
+def escape_yt_dlp_template_literal(value: str) -> str:
+    """Escapes percent signs before inserting literal text into a yt-dlp template."""
+    return (value or "").replace('%', '%%')
 
 
 def format_display_title(title: str, uploader: str) -> str:
