@@ -28,7 +28,7 @@ MAX_AUDIO_DOWNLOADS = min(max(os.cpu_count() or 4, 4), 16)
 from .settings import Settings
 from .downloader import DownloadWorker, TitlePreviewWorker
 from .logger import log
-from .themes import THEMES, build_theme
+from .themes import THEMES, THEME_DESCRIPTIONS, build_theme
 from .updater import APP_VERSION, UpdateWorker
 from .utils import extract_http_links, format_elapsed_words, format_hms, get_icon_path, is_youtube_url
 from .widgets import DesktopToast
@@ -419,6 +419,12 @@ class MainWindow(QMainWindow):
         theme_form = QFormLayout()
         self.combo_theme = NoScrollComboBox()
         self.combo_theme.addItems(THEMES)
+        for theme_index, theme_name in enumerate(THEMES):
+            self.combo_theme.setItemData(
+                theme_index,
+                THEME_DESCRIPTIONS.get(theme_name, ""),
+                Qt.ItemDataRole.ToolTipRole,
+            )
         saved_theme = self.settings.get("theme", "Dark")
         theme_idx = self.combo_theme.findText(saved_theme if saved_theme in THEMES else "Dark")
         self.combo_theme.setCurrentIndex(theme_idx if theme_idx != -1 else 0)
