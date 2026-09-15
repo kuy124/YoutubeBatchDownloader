@@ -6,7 +6,7 @@ from PySide6.QtCore import QObject, QRunnable, Signal
 
 from .utils import insecure_ssl_context
 
-APP_VERSION = "v1.9.0"
+APP_VERSION = "v1.9.1"
 
 
 def parse_version(ver_str: str) -> tuple:
