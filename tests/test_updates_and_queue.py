@@ -24,7 +24,7 @@ from app.app_update import (
     safe_zip_member,
     _REPLACEMENT_SCRIPT,
 )
-from app.downloader import build_output_template
+from app.downloader import build_output_template, is_untrusted_path_error
 from app.gui import COL_OUTPUT_NAME, MainWindow
 from app.themes import THEMES, build_theme
 from app.updater import parse_version, select_windows_asset
@@ -44,6 +44,10 @@ def workspace_temp_directory():
 
 
 class FilenameTests(unittest.TestCase):
+    def test_detects_windows_untrusted_mount_errors_without_retrying(self):
+        self.assertTrue(is_untrusted_path_error(OSError(448, "untrusted mount point")))
+        self.assertFalse(is_untrusted_path_error(OSError(5, "access denied")))
+
     def test_sanitizes_windows_names_and_selected_extension(self):
         self.assertEqual(sanitize_output_stem("CON", "MP4 Video"), "CON_")
         self.assertEqual(sanitize_output_stem("CON.notes", "MP4 Video"), "CON.notes_")

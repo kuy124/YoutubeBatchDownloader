@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication
 
 from app.logger import log
 from app.splash import LoadingSplash
+from app.settings import load_startup_theme
 from app.app_update import acknowledge_updated_startup
 from app.startup import StartupClock, marker_path_from_argv
 from app.ytdlp_updater import prepare_ytdlp_runtime, warm_ytdlp_runtime
@@ -57,12 +58,12 @@ def main():
     app = QApplication(qt_args)
     clock.mark("qt_ready")
 
-    # Modern styling fallback
+    # Fusion provides predictable widgets before the saved application theme loads.
     app.setStyle("Fusion")
 
     # Splash paints immediately so startup never looks frozen; the heavy
     # download stack (yt-dlp, mutagen) imports behind it in a visible stage.
-    splash = LoadingSplash()
+    splash = LoadingSplash(load_startup_theme())
     splash.show()
     splash.start()
     app.processEvents()

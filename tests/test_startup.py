@@ -9,12 +9,19 @@ from pathlib import Path
 from unittest import mock
 import uuid
 import shutil
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6.QtWidgets import QApplication
 
 from app.startup import StartupClock
 from app import ytdlp_updater
 from app import utils
+from app.settings import Settings
+from app.qt_runtime import filter_untrusted_path_entries
+from app.splash import LoadingSplash
+from app.themes import THEMES
 
 
 def project_temp_directory():
@@ -29,6 +36,69 @@ def project_temp_directory():
 
 
 class StartupInstrumentationTests(unittest.TestCase):
+    def test_settings_create_file_and_persist_checkbox_values(self):
+        with project_temp_directory() as temp_dir:
+            data_dir = Path(temp_dir) / "user data"
+            with mock.patch("app.settings.get_data_dir", return_value=str(data_dir)), \
+                    mock.patch("app.settings.get_install_dir", return_value=str(data_dir)), \
+                    mock.patch("app.settings.migrate_legacy_data"):
+                first = Settings()
+                self.assertTrue(Path(first.settings_file).is_file())
+                first.update({
+                    "auto_clear": True,
+                    "monitor_clipboard": True,
+                    "completion_sound": False,
+                    "batch_notifications": False,
+                    "confirm_exit_downloading": False,
+                    "restore_links": True,
+                    "use_aria2": True,
+                })
+                second = Settings()
+            for key in (
+                "auto_clear", "monitor_clipboard", "restore_links", "use_aria2",
+            ):
+                self.assertTrue(second.get(key))
+            for key in ("completion_sound", "batch_notifications", "confirm_exit_downloading"):
+                self.assertFalse(second.get(key))
+
+    def test_splash_uses_saved_theme_with_a_functional_spinner(self):
+        application = QApplication.instance() or QApplication([])
+        splash = LoadingSplash("Nord")
+        try:
+            self.assertEqual(splash.windowTitle(), "YouTube Batch Downloader")
+            self.assertIn("#2e3440", splash.styleSheet())
+            self.assertEqual(splash._spinner._timer.interval(), 90)
+            splash.start()
+            self.assertTrue(splash._spinner._timer.isActive())
+            splash.set_message("Preparing the download engine...")
+            self.assertEqual(splash._message_label.text(), "Preparing the download engine...")
+        finally:
+            splash.finish()
+            application.processEvents()
+
+    def test_splash_accepts_every_shipped_theme(self):
+        application = QApplication.instance() or QApplication([])
+        for theme_name in THEMES:
+            splash = LoadingSplash(theme_name)
+            try:
+                self.assertIn("startupDialog", splash.styleSheet())
+            finally:
+                splash.close()
+        application.processEvents()
+
+    def test_reparse_point_path_entries_are_not_inherited_by_child_tools(self):
+        safe = r"C:\\Safe Tools"
+        unsafe = r"C:\\Untrusted Junction"
+
+        def fake_lstat(path):
+            attributes = 0x0400 if path == unsafe else 0
+            return SimpleNamespace(st_file_attributes=attributes)
+
+        with mock.patch("app.qt_runtime.os.lstat", side_effect=fake_lstat):
+            filtered = filter_untrusted_path_entries(os.pathsep.join((safe, unsafe, safe)))
+
+        self.assertEqual(filtered, [safe])
+
     def test_frozen_build_separates_install_and_user_data(self):
         with project_temp_directory() as temp_dir:
             install_dir = Path(temp_dir) / "Installed App"

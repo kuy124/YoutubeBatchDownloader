@@ -282,6 +282,11 @@ def build_output_template(download_path: str, output_name: str, format_name: str
     return os.path.join(download_path, f'{literal_name}.%(ext)s')
 
 
+def is_untrusted_path_error(error: BaseException) -> bool:
+    """Identifies Windows' non-retryable untrusted-mount-path rejection."""
+    return getattr(error, "winerror", None) == 448 or "untrusted mount point" in str(error).lower()
+
+
 class DownloadWorker(QRunnable):
     def __init__(self, task_id: str, url: str, options: dict, pre_data: dict = None):
         super().__init__()
@@ -821,6 +826,13 @@ class DownloadWorker(QRunnable):
                     log.info(f"Task {self.task_id} was cancelled by user.")
                     self.cleanup_partial_files(self.final_filename)
                     self.signals.error.emit(self.task_id, "Cancelled.")
+                    return
+
+                if is_untrusted_path_error(e):
+                    log.exception("Task %s could not start a local download tool", self.task_id)
+                    self.signals.error.emit(
+                        self.task_id,
+                        "Failed: Windows blocked an untrusted tool path. Update the app and try again.")
                     return
                 
                 # If we haven't exhausted our auto-retry threshold, perform backoff pause and try again

@@ -10,6 +10,38 @@ from pathlib import Path
 
 _DLL_DIRECTORY_HANDLES = []
 _NATIVE_DLL_HANDLES = []
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
+
+
+def filter_untrusted_path_entries(path_value: str) -> list[str]:
+    """Returns inherited PATH entries that Windows can traverse safely.
+
+    Some desktop hosts add junctions to PATH.  Recent Windows security checks
+    reject those untrusted mount points when a child tool is launched, causing
+    yt-dlp or FFmpeg to fail before a download begins.  The app always invokes
+    its bundled tools by absolute path, so omitting these ambient entries is
+    both safe and more deterministic.
+    """
+    accepted = []
+    seen = set()
+    for raw_entry in (path_value or "").split(os.pathsep):
+        entry = os.path.expandvars(raw_entry.strip().strip('"'))
+        if not entry:
+            continue
+        key = os.path.normcase(os.path.normpath(entry))
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            attributes = getattr(os.lstat(entry), "st_file_attributes", 0)
+        except OSError:
+            # A malformed or inaccessible PATH entry cannot be a dependency
+            # of the bundled application and should not reach child tools.
+            continue
+        if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+            continue
+        accepted.append(entry)
+    return accepted
 
 
 def _load_matching_qt_dlls(valid: list[str]) -> None:
@@ -85,7 +117,8 @@ def prepare_qt_dll_search() -> None:
                 pass
         _load_matching_qt_dlls(valid)
         current_path = os.environ.get("PATH", "")
-        os.environ["PATH"] = os.pathsep.join(valid + [current_path])
+        os.environ["PATH"] = os.pathsep.join(
+            valid + filter_untrusted_path_entries(current_path))
 
         # Qt plugin discovery must use the same installation as the native
         # libraries.  This avoids an external Qt platform plugin being loaded

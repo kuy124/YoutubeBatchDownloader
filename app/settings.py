@@ -4,6 +4,18 @@ import sys
 from .utils import get_data_dir, get_install_dir, migrate_legacy_data
 from .logger import log
 
+
+def load_startup_theme() -> str:
+    """Reads only the saved theme so the opening dialog can match the app."""
+    settings_file = os.path.join(get_data_dir(), "settings.json")
+    try:
+        with open(settings_file, "r", encoding="utf-8") as file:
+            theme = json.load(file).get("theme")
+        return theme if isinstance(theme, str) and theme.strip() else "Dark"
+    except (OSError, ValueError, TypeError):
+        return "Dark"
+
+
 class Settings:
     def __init__(self):
         migrate_legacy_data()
@@ -36,6 +48,11 @@ class Settings:
         }
         self.load()
         self._migrate_legacy_download_path()
+        # Materialize the defaults on first run so the data directory always
+        # contains a usable settings file, even before the first preference
+        # change.
+        if not os.path.isfile(self.settings_file):
+            self.save()
 
     def _migrate_legacy_download_path(self):
         """Moves only the old default path; custom paths remain untouched."""
@@ -59,6 +76,7 @@ class Settings:
 
     def save(self):
         try:
+            os.makedirs(os.path.dirname(self.settings_file), exist_ok=True)
             with open(self.settings_file, 'w', encoding='utf-8') as f:
                 json.dump(self.config, f, indent=4)
             log.info("Settings saved successfully.")

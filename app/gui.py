@@ -534,13 +534,13 @@ class MainWindow(QMainWindow):
         storage_box_lay.addLayout(path_row)
 
         self.chk_aria2 = QCheckBox("Enable aria2c multi-connection acceleration (16 connections per file)")
-        self.chk_aria2.toggled.connect(lambda: self.save_current_settings())
+        self.chk_aria2.toggled.connect(self._on_setting_checkbox_toggled)
         self.chk_auto_clear = QCheckBox("Automatically clear completed downloads after 2 seconds")
-        self.chk_auto_clear.toggled.connect(lambda: self.save_current_settings())
+        self.chk_auto_clear.toggled.connect(self._on_setting_checkbox_toggled)
         self.chk_restore_links = QCheckBox("Restore unfinished download links on startup")
-        self.chk_restore_links.toggled.connect(lambda: self.save_current_settings())
+        self.chk_restore_links.toggled.connect(self._on_setting_checkbox_toggled)
         self.chk_confirm_exit = QCheckBox("Confirm before exiting when downloads are active")
-        self.chk_confirm_exit.toggled.connect(lambda: self.save_current_settings())
+        self.chk_confirm_exit.toggled.connect(self._on_setting_checkbox_toggled)
 
         storage_box_lay.addWidget(self.chk_aria2)
         storage_box_lay.addWidget(self.chk_auto_clear)
@@ -621,9 +621,9 @@ class MainWindow(QMainWindow):
 
         self.chk_monitor_clip = QCheckBox("Monitor clipboard and automatically queue copied links")
         self.chk_completion_sound = QCheckBox("Play audio chime when downloads finish")
-        self.chk_completion_sound.toggled.connect(lambda: self.save_current_settings())
+        self.chk_completion_sound.toggled.connect(self._on_setting_checkbox_toggled)
         self.chk_batch_notify = QCheckBox("Show system notification when downloads finish")
-        self.chk_batch_notify.toggled.connect(lambda: self.save_current_settings())
+        self.chk_batch_notify.toggled.connect(self._on_setting_checkbox_toggled)
 
         appearance_box_lay.addWidget(self.chk_monitor_clip)
         appearance_box_lay.addWidget(self.chk_completion_sound)
@@ -890,6 +890,10 @@ class MainWindow(QMainWindow):
         self.settings.update(updates, save=False)
         if hasattr(self, 'save_settings_timer'):
             self.save_settings_timer.start()
+
+    def _on_setting_checkbox_toggled(self, _checked: bool):
+        """Save every preference toggle through the same debounced path."""
+        self.save_current_settings()
 
     def _flush_settings_to_disk(self):
         self.settings.save()

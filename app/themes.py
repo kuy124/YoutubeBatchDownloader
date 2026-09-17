@@ -849,15 +849,21 @@ def _build_palette(t: dict) -> QPalette:
     return pal
 
 
+def theme_tokens(name: str) -> dict:
+    """Returns a complete, safe token set for a saved theme name."""
+    key = str(name).strip().lower() if name else "dark"
+    tokens = dict(_THEME_MAP.get(key, _DARK))
+    tokens.setdefault("primary_text", "#ffffff")
+    tokens.setdefault("selection_text", tokens["text"])
+    tokens.setdefault("control_border", tokens["border"])
+    return tokens
+
+
 def build_theme(name: str):
     """Returns (stylesheet, palette) for the specified theme name (case-insensitive).
 
     Unknown names fall back to Dark so a corrupted settings value can never
     produce an unreadable half-styled window.
     """
-    key = str(name).strip().lower() if name else "dark"
-    tokens = dict(_THEME_MAP.get(key, _DARK))
-    tokens.setdefault("primary_text", "#ffffff")
-    tokens.setdefault("selection_text", tokens["text"])
-    tokens.setdefault("control_border", tokens["border"])
+    tokens = theme_tokens(name)
     return _QSS_TEMPLATE.safe_substitute(tokens), _build_palette(tokens)
