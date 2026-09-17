@@ -1,0 +1,8 @@
+{
+  "inno_setup": {
+    "version": "6.7.3",
+    "compiler": "ISCC.exe",
+    "sha256": "0a8757031b33777e4c9cbffee40f11a5062b36d25cbe144c1db73b6102b80ad7",
+    "source": "https://jrsoftware.org/isinfo.php"
+  }
+}

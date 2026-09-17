@@ -9,7 +9,10 @@ import urllib.request
 import zipfile
 from pathlib import Path, PurePosixPath
 
-from .utils import get_root_dir
+from PySide6.QtCore import QObject, QRunnable, Signal
+
+from .logger import log
+from .utils import get_data_dir, migrate_legacy_data
 
 
 PYPI_URL = "https://pypi.org/pypi/yt-dlp/json"
@@ -20,6 +23,7 @@ _STATUS = {
     "last_result": "Not checked yet",
     "last_check": 0,
 }
+_ACTIVE_RUNTIME_PATH: Path | None = None
 
 
 def version_tuple(value: str) -> tuple:
@@ -33,7 +37,7 @@ def version_tuple(value: str) -> tuple:
 
 
 def _runtime_root() -> Path:
-    return Path(get_root_dir()) / "runtime" / "yt-dlp"
+    return Path(get_data_dir()) / "runtime" / "yt-dlp"
 
 
 def _state_path() -> Path:
@@ -166,9 +170,11 @@ def _prune_verified_versions(keep: int = 2) -> None:
 
 
 def _activate(path: Path | None) -> str:
-    if path is not None:
+    global _ACTIVE_RUNTIME_PATH
+    if path is not None and str(path) not in sys.path:
         sys.path.insert(0, str(path))
     import yt_dlp
+    _ACTIVE_RUNTIME_PATH = path
     return str(yt_dlp.version.__version__)
 
 
@@ -183,53 +189,135 @@ def _discard_failed_runtime(path: Path | None) -> None:
             del sys.modules[module_name]
 
 
-def bootstrap_ytdlp(status_callback=None) -> dict:
-    """Checks daily, activates the newest verified stable yt-dlp, and never blocks app use on failure."""
+def prepare_ytdlp_runtime() -> dict:
+    """Select the newest verified local runtime without importing or using network.
+
+    This is intentionally tiny and synchronous: it only reads ``state.json`` and
+    inspects ``.verified`` directories.  The actual engine import is performed by
+    :func:`warm_ytdlp_runtime` on a startup worker while the GUI module loads.
+    """
     global _STATUS
+    # Migrate a legacy portable runtime before selecting the active version so
+    # the first packaged launch can use the user's verified engine immediately.
+    migrate_legacy_data()
     state = _read_state()
-    now = int(time.time())
     verified = _verified_versions()
     selected_path = verified[0][2] if verified else None
     selected_version = verified[0][1] if verified else ""
-    last_check = int(state.get("last_check") or 0)
-    result = str(state.get("last_result") or "Not checked yet")
+    _STATUS = {
+        "last_check": int(state.get("last_check") or 0),
+        "active_version": str(state.get("active_version") or (selected_version or "Bundled")),
+        "runtime_version": selected_version or str(state.get("runtime_version") or ""),
+        "last_result": str(state.get("last_result") or "Not checked yet"),
+    }
+    return {"path": selected_path, "version": selected_version, "state": dict(_STATUS)}
 
-    if now - last_check >= CHECK_INTERVAL_SECONDS:
-        try:
-            version, installed_path = _download_current_stable(status_callback)
-            selected_path = installed_path
-            selected_version = version
-            result = f"Stable {version} is ready"
-        except Exception as exc:
-            result = f"Update check failed: {exc}"
-        last_check = now
 
+def warm_ytdlp_runtime(selection: dict | None = None) -> dict:
+    """Import the prepared engine and fall back safely to the bundled copy."""
+    global _STATUS
+    selection = selection or prepare_ytdlp_runtime()
+    selected_path = selection.get("path")
+    selected_version = str(selection.get("version") or "")
+    state = dict(_STATUS)
     try:
         active_version = _activate(selected_path)
         if selected_path is not None:
             _prune_verified_versions(keep=2)
+        state.update({
+            "active_version": active_version,
+            "runtime_version": selected_version or active_version,
+        })
     except Exception as runtime_exc:
+        log.warning("Verified yt-dlp runtime could not be imported; using bundled copy: %s", runtime_exc)
         _discard_failed_runtime(selected_path)
-        selected_version = ""
         try:
             active_version = _activate(None)
-            result = f"Verified runtime failed; using bundled yt-dlp: {runtime_exc}"
+            state.update({
+                "active_version": active_version,
+                "runtime_version": "",
+                "last_result": f"Verified runtime failed; using bundled yt-dlp: {runtime_exc}",
+            })
         except Exception as bundled_exc:
-            active_version = "Unavailable"
-            result = f"Could not load yt-dlp: {bundled_exc}"
-
-    state = {
-        "last_check": last_check,
-        "active_version": active_version,
-        "runtime_version": selected_version,
-        "last_result": result,
-    }
+            state.update({
+                "active_version": "Unavailable",
+                "runtime_version": "",
+                "last_result": f"Could not load yt-dlp: {bundled_exc}",
+            })
     try:
         _write_state(state)
     except OSError:
         pass
     _STATUS = dict(state)
     return dict(_STATUS)
+
+
+def check_and_install_update(status_callback=None) -> dict:
+    """Check PyPI and stage a verified runtime without hot-swapping imports."""
+    global _STATUS
+    state = _read_state()
+    now = int(time.time())
+    last_check = int(state.get("last_check") or 0)
+    active_version = str(state.get("active_version") or _STATUS.get("active_version") or "Bundled")
+    if now - last_check < CHECK_INTERVAL_SECONDS:
+        result = dict(_STATUS)
+        result.update({"state": "not_due", "last_check": last_check, "active_version": active_version})
+        return result
+
+    try:
+        version, installed_path = _download_current_stable(status_callback)
+        if version_tuple(version) > version_tuple(active_version):
+            last_result = f"Stable {version} is ready; restart required"
+            result_state = "restart_required"
+        else:
+            last_result = f"yt-dlp {active_version} is current"
+            result_state = "current"
+        state.update({
+            "last_check": now,
+            "active_version": active_version,
+            "runtime_version": version,
+            "last_result": last_result,
+        })
+    except Exception as exc:
+        result_state = "failed"
+        log.warning("Background yt-dlp update check failed: %s", exc)
+        state.update({
+            "last_check": now,
+            "active_version": active_version,
+            "last_result": f"Update check failed: {exc}",
+        })
+    try:
+        _write_state(state)
+    except OSError:
+        pass
+    _STATUS = dict(state)
+    result = dict(_STATUS)
+    result["state"] = result_state
+    return result
+
+
+class YtDlpUpdateSignals(QObject):
+    progress = Signal(str)
+    finished = Signal(dict)
+
+
+class YtDlpUpdateWorker(QRunnable):
+    """Runs the once-per-day PyPI maintenance check after first paint."""
+    def __init__(self):
+        super().__init__()
+        self.signals = YtDlpUpdateSignals()
+
+    def run(self):
+        try:
+            result = check_and_install_update(self.signals.progress.emit)
+        except Exception as exc:  # defensive: worker must never kill Qt's pool
+            result = {"state": "failed", "last_result": f"Update check failed: {exc}"}
+        self.signals.finished.emit(result)
+
+
+def bootstrap_ytdlp(status_callback=None) -> dict:
+    """Backward-compatible local bootstrap with no network on the startup path."""
+    return warm_ytdlp_runtime(prepare_ytdlp_runtime())
 
 
 def get_runtime_status() -> dict:

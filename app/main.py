@@ -1,15 +1,21 @@
 import sys
 import os
+import threading
 
 # Prevent PyInstaller library issues and handle environment paths
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from app.qt_runtime import prepare_qt_dll_search
+
+prepare_qt_dll_search()
 
 from PySide6.QtWidgets import QApplication
 
 from app.logger import log
 from app.splash import LoadingSplash
 from app.app_update import acknowledge_updated_startup
-from app.ytdlp_updater import bootstrap_ytdlp
+from app.startup import StartupClock, marker_path_from_argv
+from app.ytdlp_updater import prepare_ytdlp_runtime, warm_ytdlp_runtime
 
 
 def handle_exception(exc_type, exc_value, exc_traceback):
@@ -26,6 +32,7 @@ sys.excepthook = handle_exception
 def main():
     log.info("Application starting...")
     startup_args = list(sys.argv)
+    clock = StartupClock(marker_path_from_argv(startup_args))
 
     # Force Windows shell to associate custom title bar icon with the taskbar icon slot
     try:
@@ -41,11 +48,14 @@ def main():
         if skip_next:
             skip_next = False
             continue
-        if arg in ("--update-marker", "--update-backup"):
+        if arg in ("--update-marker", "--update-backup", "--startup-marker"):
             skip_next = True
+            continue
+        if arg.startswith("--startup-marker="):
             continue
         qt_args.append(arg)
     app = QApplication(qt_args)
+    clock.mark("qt_ready")
 
     # Modern styling fallback
     app.setStyle("Fusion")
@@ -54,27 +64,53 @@ def main():
     # download stack (yt-dlp, mutagen) imports behind it in a visible stage.
     splash = LoadingSplash()
     splash.show()
+    splash.start()
     app.processEvents()
 
     try:
-        splash.set_message("Checking the download engine...")
+        splash.set_message("Preparing the download engine...")
         app.processEvents()
-        ytdlp_status = bootstrap_ytdlp(splash.set_message)
-        log.info(
-            f"yt-dlp {ytdlp_status.get('active_version', 'unknown')}: "
-            f"{ytdlp_status.get('last_result', '')}"
-        )
+        selection = prepare_ytdlp_runtime()
+        clock.mark("runtime_path_ready")
+        warm_result: dict = {}
 
-        splash.set_message("Loading download engine (yt-dlp)...")
+        def warm_engine():
+            warm_result.update(warm_ytdlp_runtime(selection))
+
+        # Import the engine on a worker while the GUI module is being imported.
+        # No network work occurs here; only the already verified local runtime is
+        # activated, with the bundled copy as a safe fallback.
+        warm_thread = threading.Thread(target=warm_engine, name="yt-dlp-warmup", daemon=True)
+        warm_thread.start()
+
+        splash.set_message("Loading interface...")
         app.processEvents()
-        from app.gui import MainWindow  # Heavy import happens here, visibly
+        from app.gui import MainWindow
+        clock.mark("gui_import_complete")
 
         splash.set_message("Preparing interface...")
         app.processEvents()
         window = MainWindow()
+        clock.mark("window_constructed")
+        warm_thread.join()
+        ytdlp_status = warm_result or {"active_version": "Unavailable", "last_result": "Warmup failed"}
+        clock.mark("runtime_ready")
+        clock.mark("cached_runtime_ready")
+        window.set_ytdlp_runtime_status(ytdlp_status)
+        log.info(
+            f"yt-dlp {ytdlp_status.get('active_version', 'unknown')}: "
+            f"{ytdlp_status.get('last_result', '')}"
+        )
         window.show()
         app.processEvents()
+        clock.mark("first_paint")
+        clock.write({"active_ytdlp": ytdlp_status.get("active_version", "Unavailable")})
+        # Confirm a replacement immediately after the fully initialized local
+        # interface is visible. Remote maintenance must not delay this signal.
         acknowledge_updated_startup(startup_args)
+        window.start_background_maintenance(clock)
+        clock.mark("background_checks_started")
+        clock.write({"active_ytdlp": ytdlp_status.get("active_version", "Unavailable")})
     finally:
         splash.finish()
 

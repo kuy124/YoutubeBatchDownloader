@@ -2,6 +2,8 @@ import hashlib
 import io
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 import uuid
@@ -16,7 +18,9 @@ from PySide6.QtWidgets import QApplication, QPushButton
 
 from app.app_update import (
     AppUpdateDownloadWorker,
+    acknowledge_updated_startup,
     extract_release_executable,
+    launch_replacement,
     safe_zip_member,
     _REPLACEMENT_SCRIPT,
 )
@@ -66,6 +70,34 @@ class ArchiveTests(unittest.TestCase):
         self.assertIn("Where-Object { $_.Name -like '_PYI_*' }", _REPLACEMENT_SCRIPT)
         self.assertIn("Remove-Item -LiteralPath (\"Env:\" + $_.Name)", _REPLACEMENT_SCRIPT)
 
+    def test_replacement_accepts_a_stable_visible_window_when_marker_is_unsupported(self):
+        self.assertIn("function Get-ProcessesAtPath", _REPLACEMENT_SCRIPT)
+        self.assertIn("MainWindowHandle -ne 0", _REPLACEMENT_SCRIPT)
+        self.assertIn("$visibleSince.AddSeconds(3)", _REPLACEMENT_SCRIPT)
+
+    def test_updated_startup_acknowledges_marker_with_a_path_containing_spaces(self):
+        with workspace_temp_directory() as temp_dir:
+            marker = Path(temp_dir) / "folder with spaces" / "update ready.marker"
+            marker.parent.mkdir(parents=True)
+            acknowledge_updated_startup(["YouTubeBatchDownloader.exe", "--update-marker", str(marker)])
+            self.assertEqual(marker.read_text(encoding="utf-8"), "ready")
+
+    def test_replacement_helper_receives_clean_environment_and_space_paths(self):
+        with workspace_temp_directory() as temp_dir:
+            target = Path(temp_dir) / "folder with spaces" / "YouTubeBatchDownloader.exe"
+            staged = Path(temp_dir) / "folder with spaces" / "YouTubeBatchDownloader.exe.update-new"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"old")
+            staged.write_bytes(b"new")
+            with mock.patch.object(sys, "frozen", True, create=True), \
+                    mock.patch.object(sys, "executable", str(target)), \
+                    mock.patch.object(tempfile, "gettempdir", return_value=temp_dir), \
+                    mock.patch.object(subprocess, "Popen") as popen, \
+                    mock.patch.dict(os.environ, {"_PYI_TEST": "inherited", "PATH": os.environ.get("PATH", "")}, clear=True):
+                launch_replacement(str(staged), "1.2.3")
+            env = popen.call_args.kwargs["env"]
+            self.assertNotIn("_PYI_TEST", env)
+
     def test_rejects_unsafe_archive_member(self):
         self.assertFalse(safe_zip_member("../YouTubeBatchDownloader.exe"))
         self.assertFalse(safe_zip_member("C:/YouTubeBatchDownloader.exe"))
@@ -77,6 +109,17 @@ class ArchiveTests(unittest.TestCase):
             with zipfile.ZipFile(archive_path, "w") as archive:
                 archive.writestr("YoutubeBatchDownloader/YouTubeBatchDownloader.exe", b"binary")
             extract_release_executable(str(archive_path), str(output_path))
+            self.assertEqual(output_path.read_bytes(), b"binary")
+
+    def test_extracts_exact_application_executable_with_windows_separators(self):
+        with workspace_temp_directory() as temp_dir:
+            archive_path = Path(temp_dir) / "release.zip"
+            output_path = Path(temp_dir) / "new.exe"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("YoutubeBatchDownloader\\YouTubeBatchDownloader.exe", b"binary")
+
+            extract_release_executable(str(archive_path), str(output_path))
+
             self.assertEqual(output_path.read_bytes(), b"binary")
 
     def test_rejects_multiple_application_executables(self):

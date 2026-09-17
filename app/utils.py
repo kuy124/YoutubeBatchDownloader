@@ -9,6 +9,9 @@ import urllib.request
 from urllib.parse import parse_qs, urlparse
 
 
+APP_NAME = "YouTubeBatchDownloader"
+
+
 _WINDOWS_RESERVED_NAMES = {
     "CON", "PRN", "AUX", "NUL",
     *(f"COM{i}" for i in range(1, 10)),
@@ -30,11 +33,70 @@ _FORMAT_EXTENSIONS = {
 }
 
 
-def get_root_dir() -> str:
-    """Returns the root directory of the application, handling PyInstaller environment."""
+def get_install_dir() -> str:
+    """Returns the directory containing the source tree or installed executable."""
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def get_root_dir() -> str:
+    """Backward-compatible alias for the install/source directory."""
+    return get_install_dir()
+
+
+def get_data_dir() -> str:
+    """Returns the writable per-user data directory for packaged builds.
+
+    Source mode intentionally keeps data beside the checkout so the developer
+    workflow remains unchanged.  Packaged builds keep mutable files out of the
+    install directory, which makes upgrades and uninstall cleanup predictable.
+    """
+    if not getattr(sys, 'frozen', False):
+        return get_install_dir()
+    local_app_data = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Local")
+    return os.path.join(local_app_data, APP_NAME)
+
+
+def _copy_missing_tree(source: str, destination: str) -> None:
+    """Copies legacy data without replacing anything already in the new store."""
+    if os.path.isdir(source):
+        os.makedirs(destination, exist_ok=True)
+        for entry in os.scandir(source):
+            target = os.path.join(destination, entry.name)
+            if entry.is_dir(follow_symlinks=False):
+                _copy_missing_tree(entry.path, target)
+            elif entry.is_file(follow_symlinks=False) and not os.path.exists(target):
+                shutil.copy2(entry.path, target)
+    elif os.path.isfile(source) and not os.path.exists(destination):
+        os.makedirs(os.path.dirname(destination), exist_ok=True)
+        shutil.copy2(source, destination)
+
+
+def migrate_legacy_data() -> bool:
+    """Migrates mutable files from an older portable install once, safely."""
+    if not getattr(sys, 'frozen', False):
+        return False
+    install_dir = get_install_dir()
+    data_dir = get_data_dir()
+    if os.path.normcase(os.path.abspath(install_dir)) == os.path.normcase(os.path.abspath(data_dir)):
+        return False
+    marker = os.path.join(data_dir, ".legacy-migration-complete")
+    if os.path.exists(marker):
+        return False
+
+    try:
+        os.makedirs(data_dir, exist_ok=True)
+        for name in ("settings.json", "logs", "runtime"):
+            source = os.path.join(install_dir, name)
+            destination = os.path.join(data_dir, name)
+            if os.path.exists(source):
+                _copy_missing_tree(source, destination)
+        with open(marker, "w", encoding="utf-8") as marker_file:
+            marker_file.write("migrated")
+        return True
+    except (OSError, shutil.Error):
+        return False
 
 
 def get_ffmpeg_path() -> str:
@@ -47,7 +109,7 @@ def get_ffmpeg_path() -> str:
 
     # 2. Check local tools directory and root directory
     for rel_path in [os.path.join("tools", "ffmpeg.exe"), "ffmpeg.exe"]:
-        local_path = os.path.join(get_root_dir(), rel_path)
+        local_path = os.path.join(get_install_dir(), rel_path)
         if os.path.exists(local_path):
             return local_path
 
@@ -69,7 +131,7 @@ def get_aria2_path() -> str:
 
     # 2. Check local tools directory and root directory
     for rel_path in [os.path.join("tools", "aria2c.exe"), "aria2c.exe"]:
-        local_path = os.path.join(get_root_dir(), rel_path)
+        local_path = os.path.join(get_install_dir(), rel_path)
         if os.path.exists(local_path):
             return local_path
 
@@ -90,7 +152,7 @@ def get_icon_path() -> str:
             return bundled_icon
 
     # 2. Check developer workspace
-    local_icon = os.path.join(get_root_dir(), "icon.ico")
+    local_icon = os.path.join(get_install_dir(), "icon.ico")
     if os.path.exists(local_icon):
         return local_icon
 

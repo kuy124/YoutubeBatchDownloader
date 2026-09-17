@@ -123,16 +123,21 @@ _REPLACEMENT_SCRIPT = r'''param(
 $ErrorActionPreference = 'Stop'
 $newProcess = $null
 try {
+    function Get-ProcessesAtPath([string]$Path) {
+        $fullPath = [System.IO.Path]::GetFullPath($Path)
+        return @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+            try { $_.Path -and ([System.IO.Path]::GetFullPath($_.Path) -ieq $fullPath) }
+            catch { $false }
+        })
+    }
+
     # PyInstaller one-file apps have a bootloader parent and a Python child.
     # Waiting only for the child leaves the EXE locked by the parent and can
     # trigger Windows' parent-executable security validation.
     $targetFullPath = [System.IO.Path]::GetFullPath($TargetPath)
     do {
         $oldProcess = Get-Process -Id $OldPid -ErrorAction SilentlyContinue
-        $targetProcesses = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
-            try { $_.Path -and ([System.IO.Path]::GetFullPath($_.Path) -ieq $targetFullPath) }
-            catch { $false }
-        })
+        $targetProcesses = @(Get-ProcessesAtPath $targetFullPath)
         if ($oldProcess -or $targetProcesses.Count -gt 0) {
             Start-Sleep -Milliseconds 250
         }
@@ -156,17 +161,34 @@ try {
     $backupArg = '"' + $BackupPath + '"'
     $newProcess = Start-Process -FilePath $TargetPath -ArgumentList @('--update-marker', $markerArg, '--update-backup', $backupArg) -PassThru
     $deadline = (Get-Date).AddSeconds(60)
+    $visibleSince = $null
     while ((Get-Date) -lt $deadline) {
         if (Test-Path -LiteralPath $MarkerPath) {
             Remove-Item -LiteralPath $MarkerPath -Force -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $BackupPath -Force -ErrorAction SilentlyContinue
             exit 0
         }
-        if ($newProcess.HasExited) {
+        $newProcess.Refresh()
+        $updatedProcesses = @(Get-ProcessesAtPath $targetFullPath)
+        if ($newProcess.HasExited -and $updatedProcesses.Count -eq 0) {
             throw 'The updated application exited before startup completed.'
         }
+        # Current releases acknowledge their first paint with MarkerPath. Older
+        # compatible releases cannot do that, so accept only a window that has
+        # stayed visible long enough to prove a healthy interactive startup.
+        $visibleWindows = @($updatedProcesses | Where-Object { $_.MainWindowHandle -ne 0 })
+        if ($visibleWindows.Count -gt 0) {
+            if ($null -eq $visibleSince) {
+                $visibleSince = Get-Date
+            } elseif ((Get-Date) -ge $visibleSince.AddSeconds(3)) {
+                Remove-Item -LiteralPath $MarkerPath -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath $BackupPath -Force -ErrorAction SilentlyContinue
+                exit 0
+            }
+        } else {
+            $visibleSince = $null
+        }
         Start-Sleep -Milliseconds 250
-        $newProcess.Refresh()
     }
     throw 'The updated application did not confirm startup within 60 seconds.'
 } catch {
@@ -203,6 +225,14 @@ def launch_replacement(staged_path: str, version: str) -> None:
         script.write(_REPLACEMENT_SCRIPT)
 
     creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    # A one-file PyInstaller child can inherit private bootloader markers from
+    # its parent.  Strip them before PowerShell is spawned as a second line of
+    # defence; the helper also removes any markers still present before it
+    # launches the replacement executable.
+    clean_environment = {
+        key: value for key, value in os.environ.items()
+        if not key.upper().startswith("_PYI_")
+    }
     subprocess.Popen([
         "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
         "-File", script_path,
@@ -211,7 +241,7 @@ def launch_replacement(staged_path: str, version: str) -> None:
         "-TargetPath", target_path,
         "-BackupPath", backup_path,
         "-MarkerPath", marker_path,
-    ], close_fds=True, creationflags=creation_flags)
+    ], close_fds=True, creationflags=creation_flags, env=clean_environment)
 
 
 def acknowledge_updated_startup(argv: list[str]) -> None:

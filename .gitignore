@@ -7,6 +7,11 @@ venv/
 build/
 dist/
 *.spec
+!packaging/*.spec
+ffmpeg.zip
+aria2.zip
+temp_ffmpeg/
+temp_aria2/
 
 # Runtime artifacts
 logs/
@@ -18,3 +23,9 @@ tests/runtime_tmp/
 # User-local config and binaries
 settings.json
 tools/
+
+# Interrupted application-update staging files
+*.update-download
+*.update-new
+*.update-new.part
+*.backup-*

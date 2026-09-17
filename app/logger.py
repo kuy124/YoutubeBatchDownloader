@@ -1,10 +1,10 @@
 import logging
 import os
-from .utils import get_root_dir
+from .utils import get_data_dir
 
 def setup_logger():
     """Sets up the application logger."""
-    log_dir = os.path.join(get_root_dir(), "logs")
+    log_dir = os.path.join(get_data_dir(), "logs")
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, "app.log")
 

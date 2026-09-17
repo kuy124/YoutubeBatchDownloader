@@ -28,12 +28,11 @@ MAX_VIDEO_DOWNLOADS = 8
 MAX_AUDIO_DOWNLOADS = min(max(os.cpu_count() or 4, 4), 16)
 
 from .settings import Settings
-from .downloader import DownloadWorker, TitlePreviewWorker
 from .logger import log
 from .themes import THEMES, THEME_DESCRIPTIONS, build_theme
 from .updater import APP_VERSION, UpdateWorker
 from .app_update import AppUpdateDownloadWorker, launch_replacement
-from .ytdlp_updater import get_runtime_status
+from .ytdlp_updater import YtDlpUpdateWorker, get_runtime_status
 from .utils import (
     extract_http_links,
     format_elapsed_words,
@@ -96,6 +95,10 @@ class MainWindow(QMainWindow):
         self._pending_app_update = None
         self._app_update_worker = None
         self._app_update_progress = None
+        self._ytdlp_update_worker = None
+        self._pending_ytdlp_restart = False
+        self._background_maintenance_started = False
+        self._startup_clock = None
 
         self.preview_timer = QTimer()
         self.preview_timer.setSingleShot(True)
@@ -140,13 +143,84 @@ class MainWindow(QMainWindow):
         self.clipboard.dataChanged.connect(self.on_clipboard_changed)
         self.chk_monitor_clip.toggled.connect(self.on_monitor_toggled)
 
-        # Trigger silent update check on startup
-        QTimer.singleShot(1000, lambda: self.check_for_updates(manual=False))
-
         # Pre-fill any YouTube links already sitting on the clipboard; deferred so
         # the window paints instantly instead of waiting on a possibly slow/locked
         # OS clipboard read during startup.
         QTimer.singleShot(150, self.prefill_from_clipboard)
+
+    def start_background_maintenance(self, startup_clock=None):
+        """Start remote maintenance only after the first usable paint.
+
+        Keeping this separate from ``__init__`` makes the startup contract
+        explicit and lets source/frozen launchers measure first paint without a
+        network request competing for resources.
+        """
+        if self._background_maintenance_started:
+            return
+        self._background_maintenance_started = True
+        self._startup_clock = startup_clock
+        QTimer.singleShot(150, self._start_ytdlp_update_check)
+        QTimer.singleShot(1000, lambda: self.check_for_updates(manual=False))
+
+    def _start_ytdlp_update_check(self):
+        if self._ytdlp_update_worker is not None:
+            return
+        worker = YtDlpUpdateWorker()
+        worker.signals.progress.connect(self._on_ytdlp_update_progress)
+        worker.signals.finished.connect(self._on_ytdlp_update_finished)
+        self._ytdlp_update_worker = worker
+        self.statusBar.showMessage("Checking yt-dlp updates in the background...", 4000)
+        self.threadpool.start(worker)
+
+    def _on_ytdlp_update_progress(self, message: str):
+        self.statusBar.showMessage(message, 5000)
+
+    def set_ytdlp_runtime_status(self, status: dict):
+        """Refresh the Settings summary after the startup warmup completes."""
+        if hasattr(self, "lbl_ytdlp_version"):
+            self.lbl_ytdlp_version.setText(
+                f"yt-dlp: {status.get('active_version', 'Bundled')}\n"
+                f"{status.get('last_result', 'Not checked yet')}"
+            )
+
+    def _on_ytdlp_update_finished(self, result: dict):
+        self._ytdlp_update_worker = None
+        if getattr(self, "_startup_clock", None) is not None:
+            self._startup_clock.mark("update_complete")
+            self._startup_clock.write()
+        active = result.get("active_version") or get_runtime_status().get("active_version", "Bundled")
+        last_result = result.get("last_result", "Not checked yet")
+        self.set_ytdlp_runtime_status({"active_version": active, "last_result": last_result})
+        state = result.get("state")
+        if state == "restart_required":
+            self._pending_ytdlp_restart = True
+            self._ask_ytdlp_restart()
+        elif state == "failed":
+            self.statusBar.showMessage(last_result, 9000)
+
+    def _ask_ytdlp_restart(self):
+        if not self._pending_ytdlp_restart:
+            return
+        if self._has_unfinished_tasks():
+            self.statusBar.showMessage(
+                "A verified yt-dlp update is ready and will apply after downloads finish.", 9000)
+            return
+        reply = QMessageBox.question(
+            self,
+            "Restart Required",
+            "A verified yt-dlp update is ready. Restart now to activate it?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply == QMessageBox.Yes:
+            self._pending_ytdlp_restart = False
+            QApplication.quit()
+        else:
+            self.statusBar.showMessage("yt-dlp update staged; restart when convenient.", 9000)
+
+    def _maybe_restart_ytdlp(self):
+        if self._pending_ytdlp_restart and not self._has_unfinished_tasks():
+            QTimer.singleShot(0, self._ask_ytdlp_restart)
 
     def on_monitor_toggled(self, checked: bool):
         if checked:
@@ -1075,6 +1149,9 @@ class MainWindow(QMainWindow):
                 self.table.setRowHidden(row, True)
 
     def fetch_title_previews(self):
+        # Keep yt-dlp and mutagen out of the GUI import path.  The first preview
+        # pays the one-time engine import cost after the window is responsive.
+        from .downloader import TitlePreviewWorker
         text = self.url_input.toPlainText()
         if not text.strip():
             self._last_preview_text = ""
@@ -1407,6 +1484,7 @@ class MainWindow(QMainWindow):
         self.refresh_aggregates()
         if self._pending_app_update and not self._has_unfinished_tasks():
             QTimer.singleShot(0, self.install_pending_app_update)
+        self._maybe_restart_ytdlp()
 
     def rename_task(self, task_id: str):
         info = self.task_data.get(task_id)
@@ -1538,6 +1616,9 @@ class MainWindow(QMainWindow):
 
     def _launch_download_worker(self, task_id: str, url: str, options: dict, pre_data: dict = None):
         """Builds, wires and queues a DownloadWorker for the given task."""
+        # Deferred import: queue setup remains lightweight and the download
+        # stack is loaded only when the user starts or retries an item.
+        from .downloader import DownloadWorker
         worker = DownloadWorker(task_id, url, options, pre_data)
         worker.signals.progress.connect(self.update_progress)
         worker.signals.finished.connect(self.task_finished)
@@ -1665,6 +1746,7 @@ class MainWindow(QMainWindow):
         self.refresh_aggregates()
         if self._pending_app_update and not self._has_unfinished_tasks():
             QTimer.singleShot(0, self.install_pending_app_update)
+        self._maybe_restart_ytdlp()
 
     def clear_completed_tasks(self):
         completed_ids = []
@@ -1794,6 +1876,7 @@ class MainWindow(QMainWindow):
         log.info(f"Task {task_id} completed: {completion_msg}. Path: {file_path}")
         if self._pending_app_update and not self._has_unfinished_tasks():
             QTimer.singleShot(0, self.install_pending_app_update)
+        self._maybe_restart_ytdlp()
 
     def task_error(self, task_id, error_msg):
         row = self.row_mapping.get(task_id)
@@ -1818,6 +1901,7 @@ class MainWindow(QMainWindow):
             self.play_finished_sound()
         if self._pending_app_update and not self._has_unfinished_tasks():
             QTimer.singleShot(0, self.install_pending_app_update)
+        self._maybe_restart_ytdlp()
 
     def _cleanup_worker(self, task_id):
         if task_id in self.active_workers:

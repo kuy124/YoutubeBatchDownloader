@@ -1,12 +1,19 @@
 import json
 import os
-from .utils import get_root_dir
+import sys
+from .utils import get_data_dir, get_install_dir, migrate_legacy_data
 from .logger import log
 
 class Settings:
     def __init__(self):
-        self.settings_file = os.path.join(get_root_dir(), "settings.json")
-        self.default_downloads = os.path.join(get_root_dir(), "downloads")
+        migrate_legacy_data()
+        self.settings_file = os.path.join(get_data_dir(), "settings.json")
+        if getattr(sys, "frozen", False):
+            downloads_base = os.path.join(os.path.expanduser("~"), "Downloads")
+            self.default_downloads = os.path.join(downloads_base, "YouTubeBatchDownloader")
+        else:
+            downloads_base = os.path.join(get_install_dir(), "downloads")
+            self.default_downloads = downloads_base
         
         # Clean defaults: Separate quality presets for videos and audios
         self.config = {
@@ -28,6 +35,17 @@ class Settings:
             "threads": max(12, (os.cpu_count() or 4) * 2)
         }
         self.load()
+        self._migrate_legacy_download_path()
+
+    def _migrate_legacy_download_path(self):
+        """Moves only the old default path; custom paths remain untouched."""
+        old_default = os.path.join(get_install_dir(), "downloads")
+        if os.path.normcase(os.path.abspath(self.config.get("download_path", ""))) != os.path.normcase(os.path.abspath(old_default)):
+            return
+        if self.config.get("download_path") == self.default_downloads:
+            return
+        self.config["download_path"] = self.default_downloads
+        self.save()
 
     def load(self):
         if os.path.exists(self.settings_file):
