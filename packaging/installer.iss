@@ -1,6 +1,8 @@
 #define AppName "YouTube Batch Downloader"
 #define AppId "YouTubeBatchDownloader"
-#define AppVersion "1.9.2"
+#ifndef AppVersion
+#define AppVersion "0.0.0"
+#endif
 #define AppPublisher "YouTube Batch Downloader"
 #define AppExeName "YouTubeBatchDownloader.exe"
 

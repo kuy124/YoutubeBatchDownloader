@@ -48,9 +48,10 @@ Ensure you have Python 3.11 or newer installed.
 If you modify the source code and want to compile a release:
 
 1. Double-click **`build.bat`**.
-2. The script uses PyInstaller to bundle your code, standard libraries, and the `tools/ffmpeg.exe` binary into a single file.
-3. Install the pinned Inno Setup 6.7.3 compiler and set `ISCC_PATH` if `ISCC.exe` is not in the standard install location. The build verifies the compiler hash before packaging.
-4. The completed release is organized as:
+2. The build reads the release version from `app/updater.py`, so the version only needs to be changed in one place.
+3. The script uses PyInstaller to bundle your code, standard libraries, and the `tools/ffmpeg.exe` binary into a single file.
+4. Install the pinned Inno Setup 6.7.3 compiler and set `ISCC_PATH` if `ISCC.exe` is not in the standard install location. The build verifies the compiler hash before packaging.
+5. The completed release is organized as:
    - `dist/installer/YouTubeBatchDownloader-vX.Y.Z-Setup.exe`
    - `dist/portable/YoutubeBatchDownloader-vX.Y.Z.zip`
    - `dist/metadata/` for hashes and the release manifest
