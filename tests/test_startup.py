@@ -61,6 +61,82 @@ class StartupInstrumentationTests(unittest.TestCase):
             for key in ("completion_sound", "batch_notifications", "confirm_exit_downloading"):
                 self.assertFalse(second.get(key))
 
+    def test_gui_checkbox_changes_are_written_before_close(self):
+        application = QApplication.instance() or QApplication([])
+        with project_temp_directory() as temp_dir:
+            data_dir = Path(temp_dir) / "user data"
+            with mock.patch("app.settings.get_data_dir", return_value=str(data_dir)), \
+                    mock.patch("app.settings.get_install_dir", return_value=str(data_dir)), \
+                    mock.patch("app.settings.migrate_legacy_data"):
+                from app.gui import MainWindow
+
+                window = MainWindow()
+                try:
+                    window.chk_auto_clear.setChecked(True)
+                    window.chk_monitor_clip.setChecked(True)
+                    window.chk_completion_sound.setChecked(False)
+                    window.chk_batch_notify.setChecked(False)
+                    window.chk_confirm_exit.setChecked(False)
+                    window.chk_restore_links.setChecked(True)
+                    window.chk_aria2.setChecked(True)
+                    application.processEvents()
+
+                    saved = json.loads(Path(window.settings.settings_file).read_text(encoding="utf-8"))
+                    self.assertTrue(saved["auto_clear"])
+                    self.assertTrue(saved["monitor_clipboard"])
+                    self.assertFalse(saved["completion_sound"])
+                    self.assertFalse(saved["batch_notifications"])
+                    self.assertFalse(saved["confirm_exit_downloading"])
+                    self.assertTrue(saved["restore_links"])
+                    self.assertTrue(saved["use_aria2"])
+                finally:
+                    window.close()
+                    window.deleteLater()
+                    application.processEvents()
+
+                reopened = Settings()
+                for key in ("auto_clear", "monitor_clipboard", "restore_links", "use_aria2"):
+                    self.assertTrue(reopened.get(key))
+                for key in ("completion_sound", "batch_notifications", "confirm_exit_downloading"):
+                    self.assertFalse(reopened.get(key))
+
+    def test_gui_startup_does_not_overwrite_saved_checkboxes(self):
+        from PySide6.QtTest import QTest
+
+        application = QApplication.instance() or QApplication([])
+        with project_temp_directory() as temp_dir:
+            data_dir = Path(temp_dir) / "user data"
+            with mock.patch("app.settings.get_data_dir", return_value=str(data_dir)), \
+                    mock.patch("app.settings.get_install_dir", return_value=str(data_dir)), \
+                    mock.patch("app.settings.migrate_legacy_data"):
+                Settings().update({
+                    "format": "MP3 Audio",
+                    "audio_boost": "150% (+3.5 dB)",
+                    "auto_clear": True,
+                    "monitor_clipboard": True,
+                    "completion_sound": False,
+                    "batch_notifications": False,
+                    "confirm_exit_downloading": False,
+                    "restore_links": True,
+                    "use_aria2": True,
+                })
+
+                from app.gui import MainWindow
+
+                window = MainWindow()
+                try:
+                    QTest.qWait(400)
+                    application.processEvents()
+                    restored = Settings()
+                    for key in ("auto_clear", "monitor_clipboard", "restore_links", "use_aria2"):
+                        self.assertTrue(restored.get(key))
+                    for key in ("completion_sound", "batch_notifications", "confirm_exit_downloading"):
+                        self.assertFalse(restored.get(key))
+                finally:
+                    window.close()
+                    window.deleteLater()
+                    application.processEvents()
+
     def test_splash_uses_saved_theme_with_a_functional_spinner(self):
         application = QApplication.instance() or QApplication([])
         splash = LoadingSplash("Nord")

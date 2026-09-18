@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import tempfile
 from .utils import get_data_dir, get_install_dir, migrate_legacy_data
 from .logger import log
 
@@ -75,13 +76,32 @@ class Settings:
                 log.error(f"Failed to load settings: {str(e)}")
 
     def save(self):
+        temporary = None
         try:
-            os.makedirs(os.path.dirname(self.settings_file), exist_ok=True)
-            with open(self.settings_file, 'w', encoding='utf-8') as f:
+            settings_dir = os.path.dirname(self.settings_file)
+            os.makedirs(settings_dir, exist_ok=True)
+            fd, temporary = tempfile.mkstemp(
+                prefix=".settings-",
+                suffix=".tmp",
+                dir=settings_dir,
+            )
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
                 json.dump(self.config, f, indent=4)
-            log.info("Settings saved successfully.")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temporary, self.settings_file)
+            temporary = None
+            log.info("Settings saved successfully to %s.", self.settings_file)
+            return True
         except Exception as e:
-            log.error(f"Failed to save settings: {str(e)}")
+            log.error("Failed to save settings to %s: %s", self.settings_file, e)
+            return False
+        finally:
+            if temporary:
+                try:
+                    os.remove(temporary)
+                except OSError:
+                    pass
 
     def get(self, key, default=None):
         return self.config.get(key, default)

@@ -122,6 +122,7 @@ class MainWindow(QMainWindow):
         self.setup_ui()
         self.desktop_toast = DesktopToast()
         self.apply_settings()
+        QApplication.instance().aboutToQuit.connect(self._flush_settings_to_disk)
 
         # Windows taskbar progress overlay + completion tray notifications
         self.taskbar = WinTaskbarProgress()
@@ -229,7 +230,7 @@ class MainWindow(QMainWindow):
                 "Any copied YouTube links will automatically be added to your queue.",
                 2500
             )
-        self.save_current_settings()
+        self.save_current_settings(immediate=True)
 
     def closeEvent(self, event):
         """Optionally confirms exit mid-batch, persists the link list, then drains
@@ -244,7 +245,7 @@ class MainWindow(QMainWindow):
 
         if self.save_settings_timer.isActive():
             self.save_settings_timer.stop()
-            self._flush_settings_to_disk()
+        self._flush_settings_to_disk()
 
         self.preview_timer.stop()
         self.clipboard_timer.stop()
@@ -846,6 +847,13 @@ class MainWindow(QMainWindow):
         )
 
     def apply_settings(self):
+        self._applying_settings = True
+        try:
+            self._apply_settings_values()
+        finally:
+            self._applying_settings = False
+
+    def _apply_settings_values(self):
         self.entry_path.setText(self.settings.get("download_path"))
         saved_format = self.settings.get("format", "MP4 Video")
         self.combo_format.setCurrentText(saved_format)
@@ -866,7 +874,9 @@ class MainWindow(QMainWindow):
             chk.setChecked(bool(self.settings.get(key, default)))
             chk.blockSignals(False)
 
-    def save_current_settings(self):
+    def save_current_settings(self, immediate: bool = False):
+        if getattr(self, "_applying_settings", False):
+            return
         fmt = self.combo_format.currentText()
         current_q = self.combo_quality.currentText()
         updates = {
@@ -888,12 +898,16 @@ class MainWindow(QMainWindow):
             updates["video_quality"] = current_q
 
         self.settings.update(updates, save=False)
-        if hasattr(self, 'save_settings_timer'):
+        if immediate:
+            if hasattr(self, 'save_settings_timer'):
+                self.save_settings_timer.stop()
+            self._flush_settings_to_disk()
+        elif hasattr(self, 'save_settings_timer'):
             self.save_settings_timer.start()
 
     def _on_setting_checkbox_toggled(self, _checked: bool):
-        """Save every preference toggle through the same debounced path."""
-        self.save_current_settings()
+        """Commit preference toggles immediately so closing cannot lose them."""
+        self.save_current_settings(immediate=True)
 
     def _flush_settings_to_disk(self):
         self.settings.save()
@@ -902,7 +916,7 @@ class MainWindow(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, "Select Download Folder", self.entry_path.text())
         if folder:
             self.entry_path.setText(folder)
-            self.save_current_settings()
+            self.save_current_settings(immediate=True)
 
     def open_downloads_folder(self):
         folder = self.entry_path.text()
