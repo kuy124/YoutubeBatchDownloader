@@ -4,7 +4,7 @@ import urllib.request
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
-APP_VERSION = "v1.9.2"
+APP_VERSION = "v1.9.3"
 RELEASE_API_URL = "https://api.github.com/repos/kuy124/YoutubeBatchDownloader/releases/latest"
 USER_AGENT = "YouTubeBatchDownloader-Updater"
 
