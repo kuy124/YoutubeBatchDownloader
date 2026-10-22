@@ -27,7 +27,7 @@ from app.app_update import (
 from app.downloader import build_output_template, is_untrusted_path_error
 from app.gui import COL_OUTPUT_NAME, MainWindow
 from app.themes import THEMES, build_theme
-from app.updater import parse_version, select_windows_asset
+from app.updater import RELEASES_URL, UpdateWorker, parse_version, select_windows_asset
 from app.utils import output_extension_for_format, sanitize_output_stem
 from app import ytdlp_updater
 from app.ytdlp_updater import install_verified_wheel, version_tuple
@@ -233,6 +233,48 @@ class UpdateDownloadTests(unittest.TestCase):
 
 
 class ReleaseTests(unittest.TestCase):
+    def check_release(self, current_version, html):
+        latest = mock.MagicMock()
+        latest.__enter__.return_value.geturl.return_value = RELEASES_URL + '/tag/v2.0'
+        assets = mock.MagicMock()
+        assets.__enter__.return_value.read.return_value = html.encode('utf-8')
+        worker = UpdateWorker(current_version, manual=True)
+        updates, errors, unchanged = [], [], []
+        worker.signals.update_available.connect(updates.append)
+        worker.signals.error.connect(errors.append)
+        worker.signals.no_update.connect(unchanged.append)
+        with mock.patch('app.updater.urllib.request.urlopen', side_effect=[latest, assets]) as request:
+            worker.run()
+        urls = [call.args[0].full_url for call in request.call_args_list]
+        self.assertEqual(urls[0], RELEASES_URL + '/latest')
+        if len(urls) > 1:
+            self.assertEqual(urls[1], RELEASES_URL + '/expanded_assets/v2.0')
+        return updates, errors, unchanged
+
+    def test_public_release_pages_preserve_asset_checksums(self):
+        html = f'''<ul><li><a href="/kuy124/YoutubeBatchDownloader/releases/download/v2.0/YouTubeBatchDownloader.exe">exe</a>
+            <span>sha256:{'a' * 64}</span></li>
+            <li><a href="/kuy124/YoutubeBatchDownloader/releases/download/v2.0/YouTubeBatchDownloader%20Portable.zip">zip</a>
+            <clipboard-copy value="sha256:{'b' * 64}"></clipboard-copy></li>
+            <li><a href="/kuy124/YoutubeBatchDownloader/archive/refs/tags/v2.0.zip">source</a></li></ul>'''
+        updates, errors, unchanged = self.check_release('v1.0', html)
+        self.assertEqual(errors, [])
+        self.assertEqual(unchanged, [])
+        self.assertEqual(updates[0]['asset_name'], 'YouTubeBatchDownloader Portable.zip')
+        self.assertEqual(updates[0]['sha256'], 'b' * 64)
+        self.assertEqual(updates[0]['html_url'], RELEASES_URL + '/tag/v2.0')
+
+    def test_public_release_rejects_missing_or_invalid_checksum(self):
+        for digest in ('', 'sha256:1234'):
+            updates, errors, _ = self.check_release('v1.0', f'''<li>
+                <a href="/kuy124/YoutubeBatchDownloader/releases/download/v2.0/YouTubeBatchDownloader.zip">zip</a>
+                <span>{digest}</span></li>''')
+            self.assertEqual(updates, [])
+            self.assertIn('SHA-256', errors[0])
+
+    def test_current_version_does_not_fetch_assets(self):
+        self.assertEqual(self.check_release('v2.0', ''), ([], [], [True]))
+
     def test_version_ordering(self):
         self.assertGreater(parse_version("v1.10.0"), parse_version("1.9.9"))
         self.assertGreater(version_tuple("2026.10.1"), version_tuple("2026.8.19"))
