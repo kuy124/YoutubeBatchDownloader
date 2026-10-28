@@ -1,3 +1,5 @@
+import hashlib
+import io
 import json
 import os
 import subprocess
@@ -9,6 +11,7 @@ from pathlib import Path
 from unittest import mock
 import uuid
 import shutil
+import zipfile
 from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -243,6 +246,68 @@ class StartupInstrumentationTests(unittest.TestCase):
         )
         self.assertEqual(result.stdout.strip(), "0 0 0")
 
+    def test_restart_launches_an_independent_source_or_packaged_app(self):
+        from app.app_update import restart_application
+
+        for frozen in (False, True):
+            with self.subTest(frozen=frozen), mock.patch.object(sys, "frozen", frozen, create=True), \
+                    mock.patch("app.app_update.subprocess.Popen") as launch, \
+                    mock.patch.dict(os.environ, {"PYINSTALLER_RESET_ENVIRONMENT": "0"}):
+                restart_application()
+                command = launch.call_args.args[0]
+                self.assertEqual(command[0], sys.executable)
+                if frozen:
+                    self.assertEqual(command, [sys.executable])
+                else:
+                    self.assertEqual(Path(command[1]), Path(__file__).resolve().parents[1] / "app" / "main.py")
+                self.assertEqual(launch.call_args.kwargs["env"]["PYINSTALLER_RESET_ENVIRONMENT"], "1")
+                self.assertEqual(os.environ["PYINSTALLER_RESET_ENVIRONMENT"], "0")
+
+    def test_ytdlp_restart_only_closes_after_a_successful_relaunch(self):
+        from app.gui import MainWindow, QMessageBox
+
+        for error in (None, OSError("relaunch failed")):
+            window = SimpleNamespace(
+                _pending_ytdlp_restart=True, _has_unfinished_tasks=lambda: False,
+                close=mock.Mock(),
+            )
+            with self.subTest(error=error), \
+                    mock.patch("app.gui.QMessageBox.question", return_value=QMessageBox.Yes), \
+                    mock.patch("app.gui.restart_application", side_effect=error) as restart, \
+                    mock.patch("app.gui.QApplication.quit") as quit_app, \
+                    mock.patch("app.gui.QMessageBox.warning") as warning:
+                MainWindow._ask_ytdlp_restart(window)
+                restart.assert_called_once_with()
+                if error:
+                    window.close.assert_not_called()
+                    quit_app.assert_not_called()
+                    warning.assert_called_once()
+                    self.assertTrue(window._pending_ytdlp_restart)
+                else:
+                    window.close.assert_called_once_with()
+                    quit_app.assert_called_once_with()
+                    warning.assert_not_called()
+                    self.assertFalse(window._pending_ytdlp_restart)
+
+    def test_ytdlp_restart_waits_for_downloads_and_respects_no(self):
+        from app.gui import MainWindow, QMessageBox
+
+        for unfinished in (True, False):
+            window = SimpleNamespace(
+                _pending_ytdlp_restart=True, _has_unfinished_tasks=lambda: unfinished,
+                statusBar=mock.Mock(), close=mock.Mock(),
+            )
+            with self.subTest(unfinished=unfinished), \
+                    mock.patch("app.gui.QMessageBox.question", return_value=QMessageBox.No) as question, \
+                    mock.patch("app.gui.restart_application") as restart, \
+                    mock.patch("app.gui.QApplication.quit") as quit_app:
+                MainWindow._ask_ytdlp_restart(window)
+                self.assertEqual(question.call_count, 0 if unfinished else 1)
+                restart.assert_not_called()
+                quit_app.assert_not_called()
+                window.close.assert_not_called()
+                self.assertTrue(window._pending_ytdlp_restart)
+
 
 class BackgroundYtDlpUpdateTests(unittest.TestCase):
     def setUp(self):
@@ -286,6 +351,46 @@ class BackgroundYtDlpUpdateTests(unittest.TestCase):
         self.assertEqual(result["state"], "restart_required")
         self.assertIn("restart required", result["last_result"])
         self.assertEqual(write_state.call_args.args[0]["active_version"], "2026.1.1")
+
+    def test_downloaded_update_is_active_after_a_cold_start(self):
+        wheel = io.BytesIO()
+        with zipfile.ZipFile(wheel, "w") as archive:
+            archive.writestr("yt_dlp/__init__.py", "from . import version\n")
+            archive.writestr("yt_dlp/version.py", "__version__ = '2026.09.01'\n")
+        wheel_bytes = wheel.getvalue()
+        metadata = {
+            "info": {"version": "2026.9.1"},
+            "releases": {"2026.9.1": [{
+                "packagetype": "bdist_wheel", "filename": "yt_dlp-2026.9.1-py3-none-any.whl",
+                "digests": {"sha256": hashlib.sha256(wheel_bytes).hexdigest()},
+                "url": "https://files.pythonhosted.org/yt_dlp.whl",
+            }]},
+        }
+        with project_temp_directory() as temp_dir:
+            with mock.patch.object(ytdlp_updater, "get_data_dir", return_value=temp_dir), \
+                    mock.patch.object(ytdlp_updater.urllib.request, "urlopen", side_effect=[
+                        io.BytesIO(json.dumps(metadata).encode("utf-8")), io.BytesIO(wheel_bytes),
+                    ]):
+                staged = ytdlp_updater.check_and_install_update()
+            self.assertEqual(staged["state"], "restart_required")
+            code = f'''
+from unittest import mock
+from app import ytdlp_updater as updater
+updater.get_data_dir = lambda: {temp_dir!r}
+updater.migrate_legacy_data = lambda: None
+with mock.patch.object(updater.urllib.request, "urlopen", side_effect=AssertionError("unexpected network")):
+    active = updater.bootstrap_ytdlp()
+    assert active["active_version"] == "2026.09.01", active
+    assert active["last_result"] == "yt-dlp 2026.09.01 is active", active
+    cached = updater.check_and_install_update()
+    assert cached["state"] == "not_due", cached
+    assert cached["last_result"] == active["last_result"], cached
+'''
+            result = subprocess.run(
+                [sys.executable, "-c", code], cwd=Path(__file__).resolve().parents[1],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_recent_check_does_not_hit_network(self):
         with mock.patch.object(ytdlp_updater, "_read_state", return_value={

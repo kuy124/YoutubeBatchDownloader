@@ -209,6 +209,15 @@ try {
 '''
 
 
+def restart_application() -> None:
+    """Relaunch independently of the old one-file app's temporary directory."""
+    command = [sys.executable]
+    if not getattr(sys, "frozen", False):
+        command.append(os.path.join(os.path.dirname(__file__), "main.py"))
+    subprocess.Popen(command, close_fds=True,
+                     env=dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT="1"))
+
+
 def launch_replacement(staged_path: str, version: str) -> None:
     if not getattr(sys, "frozen", False):
         raise RuntimeError("Automatic application installation is available only in the packaged EXE.")

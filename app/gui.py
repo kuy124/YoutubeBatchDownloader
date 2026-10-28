@@ -31,7 +31,7 @@ from .settings import Settings
 from .logger import log
 from .themes import THEMES, THEME_DESCRIPTIONS, build_theme
 from .updater import APP_VERSION, UpdateWorker
-from .app_update import AppUpdateDownloadWorker, launch_replacement
+from .app_update import AppUpdateDownloadWorker, launch_replacement, restart_application
 from .ytdlp_updater import YtDlpUpdateWorker, get_runtime_status
 from .utils import (
     extract_http_links,
@@ -214,7 +214,13 @@ class MainWindow(QMainWindow):
             QMessageBox.Yes,
         )
         if reply == QMessageBox.Yes:
+            try:
+                restart_application()
+            except Exception as exc:
+                QMessageBox.warning(self, "Restart Failed", f"Could not restart the app: {exc}\nYou can still restart it manually.")
+                return
             self._pending_ytdlp_restart = False
+            self.close()
             QApplication.quit()
         else:
             self.statusBar.showMessage("yt-dlp update staged; restart when convenient.", 9000)

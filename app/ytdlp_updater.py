@@ -227,6 +227,7 @@ def warm_ytdlp_runtime(selection: dict | None = None) -> dict:
         state.update({
             "active_version": active_version,
             "runtime_version": selected_version or active_version,
+            "last_result": f"yt-dlp {active_version} is active",
         })
     except Exception as runtime_exc:
         log.warning("Verified yt-dlp runtime could not be imported; using bundled copy: %s", runtime_exc)
