@@ -16,6 +16,9 @@ datas = [(str(PROJECT_ROOT / "tools"), "tools")]
 if ICON_FILE.is_file():
     datas.append((str(ICON_FILE), "."))
 datas += collect_data_files("yt_dlp")
+# yt-dlp imports the challenge solver lazily and reads its scripts as data files,
+# so neither analysis nor the yt_dlp collection above picks it up on its own.
+datas += collect_data_files("yt_dlp_ejs", includes=["**/*.js"])
 
 
 a = Analysis(
@@ -23,7 +26,7 @@ a = Analysis(
     pathex=[str(PROJECT_ROOT)],
     binaries=[],
     datas=datas,
-    hiddenimports=["yt_dlp", "mutagen"],
+    hiddenimports=["yt_dlp", "yt_dlp_ejs", "mutagen"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

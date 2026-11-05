@@ -3,4 +3,7 @@ PySide6-Essentials==6.11.2
 PySide6-Addons==6.11.2
 shiboken6==6.11.2
 yt-dlp>=2023.11.16
+# The app never imports this; yt-dlp discovers it and cannot solve YouTube's
+# signature challenge without it, which silently drops every audio format.
+yt-dlp-ejs>=0.8.0
 mutagen>=1.47.0

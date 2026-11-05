@@ -1,9 +1,15 @@
 import os
+import subprocess
 import sys
 import uuid
 import time
 import webbrowser
-import winsound  # Standard library module to trigger clean system chimes
+try:
+    import winsound
+except ImportError:
+    winsound = None
+
+from .platform_compat import IS_WINDOWS, open_path
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                                QLabel, QTextEdit, QPushButton, QComboBox, QCheckBox,
                                QLineEdit, QFileDialog, QTableWidget, QTableWidgetItem,
@@ -34,10 +40,14 @@ from .updater import APP_VERSION, UpdateWorker
 from .app_update import AppUpdateDownloadWorker, launch_replacement, restart_application
 from .ytdlp_updater import YtDlpUpdateWorker, get_runtime_status
 from .utils import (
+    PLAYLIST_PREVIEW_LABEL,
+    build_cookies_options,
+    clean_youtube_url,
     extract_http_links,
     format_elapsed_words,
     format_hms,
     get_icon_path,
+    is_expandable_playlist,
     is_youtube_url,
     output_extension_for_format,
     sanitize_output_stem,
@@ -53,6 +63,34 @@ COL_PROGRESS = 3
 COL_SPEED = 4
 COL_ETA = 5
 COL_ACTIONS = 6
+
+FORMAT_CHOICES = [
+    "Best Quality (MKV)",
+    "MP4 Video",
+    "WEBM Video",
+    "AVI Video",
+    "MOV Video",
+    "MP3 Audio",
+    "M4A Audio",
+    "WAV Audio",
+    "FLAC Audio",
+    "AAC Audio",
+    "OPUS Audio",
+]
+SPEED_LIMITS = [
+    "No limit", "512 KB/s", "1 MB/s", "2 MB/s", "5 MB/s", "10 MB/s", "25 MB/s",
+]
+SUBTITLE_MODES = ["Off", "Embed in video", "Save as .srt file"]
+COOKIE_MODES = ["Disabled", "From browser", "cookies.txt file"]
+COOKIE_BROWSERS = ["chrome", "edge", "firefox", "brave", "opera", "vivaldi", "chromium", "whale"]
+PLAYLIST_ITEM_LIMITS = ["50 videos", "100 videos", "200 videos", "500 videos", "No limit"]
+POST_BATCH_ACTIONS = [
+    "Do nothing",
+    "Open download folder",
+    "Sleep",
+    "Hibernate",
+    "Shut down",
+]
 
 
 class NoScrollComboBox(QComboBox):
@@ -91,6 +129,12 @@ class MainWindow(QMainWindow):
         self.active_metrics = {}    # Tracks realtime speed, bytes left, and ETA per worker
         self.extraction_samples = []  # Rolling window of measured extraction durations
         self.batch_start_time = None
+        self._batch_action_done = False
+        self._raw_titles = {}
+        self._pending_playlists = set()
+        # A QRunnable's lambda-slot connections die with the last reference to it,
+        # so expansion workers stay rooted here until their signals are delivered.
+        self._expansion_workers = set()
         self._editing_output_name = False
         self._pending_app_update = None
         self._app_update_worker = None
@@ -143,6 +187,7 @@ class MainWindow(QMainWindow):
         self.clipboard = QApplication.clipboard()
         self.clipboard.dataChanged.connect(self.on_clipboard_changed)
         self.chk_monitor_clip.toggled.connect(self.on_monitor_toggled)
+
 
         # Pre-fill any YouTube links already sitting on the clipboard; deferred so
         # the window paints instantly instead of waiting on a possibly slow/locked
@@ -292,6 +337,16 @@ class MainWindow(QMainWindow):
 
     def on_update_available(self, release: dict):
         latest_ver = release['version']
+        if not IS_WINDOWS:
+            reply = QMessageBox.question(
+                self, "Update Available",
+                f"Version {latest_ver} is available. Open the release page to download "
+                "the Linux archive? Close the app before replacing its folder.",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+            )
+            if reply == QMessageBox.Yes and release.get('html_url'):
+                webbrowser.open(release['html_url'])
+            return
         reply = QMessageBox.question(
             self,
             "Update Available",
@@ -548,12 +603,75 @@ class MainWindow(QMainWindow):
         self.chk_restore_links.toggled.connect(self._on_setting_checkbox_toggled)
         self.chk_confirm_exit = QCheckBox("Confirm before exiting when downloads are active")
         self.chk_confirm_exit.toggled.connect(self._on_setting_checkbox_toggled)
+        self.chk_expand_playlists = QCheckBox("Expand playlist and channel links into separate queue rows")
+        self.chk_expand_playlists.toggled.connect(self._on_setting_checkbox_toggled)
+        self.chk_skip_existing = QCheckBox("Skip items whose output file already exists in the download folder")
+        self.chk_skip_existing.toggled.connect(self._on_setting_checkbox_toggled)
 
         storage_box_lay.addWidget(self.chk_aria2)
         storage_box_lay.addWidget(self.chk_auto_clear)
         storage_box_lay.addWidget(self.chk_restore_links)
         storage_box_lay.addWidget(self.chk_confirm_exit)
+        storage_box_lay.addWidget(self.chk_expand_playlists)
+        storage_box_lay.addWidget(self.chk_skip_existing)
+
+        playlist_row = QHBoxLayout()
+        playlist_row.addWidget(QLabel("Playlist size cap:"))
+        self.combo_playlist_limit = NoScrollComboBox()
+        self.combo_playlist_limit.addItems(PLAYLIST_ITEM_LIMITS)
+        self.combo_playlist_limit.currentTextChanged.connect(lambda: self.save_current_settings())
+        playlist_row.addWidget(self.combo_playlist_limit)
+        playlist_row.addStretch()
+        storage_box_lay.addLayout(playlist_row)
         content_lay.addWidget(self.grp_storage)
+
+        # Section 1b: Network and Access
+        self.grp_network = QGroupBox("Network and Access")
+        self.network_form = QFormLayout(self.grp_network)
+        self.network_form.setLabelAlignment(Qt.AlignRight)
+        self.network_form.setHorizontalSpacing(12)
+
+        self.combo_speed_limit = NoScrollComboBox()
+        self.combo_speed_limit.addItems(SPEED_LIMITS)
+        self.combo_speed_limit.setToolTip(
+            "Caps every download connection. With several rows running the\n"
+            "aggregate speed stays a multiple of this value.")
+        self.combo_speed_limit.currentTextChanged.connect(lambda: self.save_current_settings())
+        self.network_form.addRow("Speed Limit:", self.combo_speed_limit)
+
+        self.combo_cookies_mode = NoScrollComboBox()
+        self.combo_cookies_mode.addItems(COOKIE_MODES)
+        self.combo_cookies_mode.setToolTip(
+            "Signed-in access unlocks age-restricted, members-only and\n"
+            "bot-checked videos that otherwise fail with HTTP 403.\n\n"
+            "Leave disabled for normal downloads. 'From browser' reads an existing\n"
+            "browser session. Browser encryption may prevent access, especially\n"
+            "with Chrome or Edge on Windows. Firefox or a cookies.txt file\n"
+            "may work instead. Cookies are optional and never bypass permissions.")
+        self.combo_cookies_mode.currentTextChanged.connect(self._on_cookies_mode_changed)
+        self.network_form.addRow("Cookies:", self.combo_cookies_mode)
+
+        self.combo_cookies_browser = NoScrollComboBox()
+        self.combo_cookies_browser.addItems(COOKIE_BROWSERS)
+        self.combo_cookies_browser.currentTextChanged.connect(lambda: self.save_current_settings())
+        self.network_form.addRow("Browser:", self.combo_cookies_browser)
+
+        self.cookies_file_row = QWidget()
+        cookies_file_lay = QHBoxLayout(self.cookies_file_row)
+        cookies_file_lay.setContentsMargins(0, 0, 0, 0)
+        self.entry_cookies_file = QLineEdit()
+        self.entry_cookies_file.setReadOnly(True)
+        self.entry_cookies_file.setPlaceholderText("cookies.txt exported from your browser")
+        cookies_file_lay.addWidget(self.entry_cookies_file)
+        btn_cookies_browse = QPushButton("Browse...")
+        btn_cookies_browse.clicked.connect(self.browse_cookies_file)
+        btn_cookies_clear = QPushButton("Clear")
+        btn_cookies_clear.clicked.connect(self.clear_cookies_file)
+        cookies_file_lay.addWidget(btn_cookies_browse)
+        cookies_file_lay.addWidget(btn_cookies_clear)
+        self.network_form.addRow("Cookie File:", self.cookies_file_row)
+
+        content_lay.addWidget(self.grp_network)
 
         # Section 2: Format and Quality
         self.grp_format = QGroupBox("Format and Quality")
@@ -562,19 +680,7 @@ class MainWindow(QMainWindow):
         form_format.setHorizontalSpacing(12)
 
         self.combo_format = NoScrollComboBox()
-        self.combo_format.addItems([
-            "Best Quality (MKV)",
-            "MP4 Video",
-            "WEBM Video",
-            "AVI Video",
-            "MOV Video",
-            "MP3 Audio",
-            "M4A Audio",
-            "WAV Audio",
-            "FLAC Audio",
-            "AAC Audio",
-            "OPUS Audio"
-        ])
+        self.combo_format.addItems(FORMAT_CHOICES)
         form_format.addRow("Format:", self.combo_format)
 
         quality_row = QWidget()
@@ -603,6 +709,19 @@ class MainWindow(QMainWindow):
         ])
         self.combo_boost.currentTextChanged.connect(lambda: self.save_current_settings())
         form_format.addRow("Audio Boost:", self.combo_boost)
+
+        self.combo_subtitles = NoScrollComboBox()
+        self.combo_subtitles.addItems(SUBTITLE_MODES)
+        self.combo_subtitles.setToolTip(
+            "Video formats only. Embed writes a soft subtitle track into the\n"
+            "container; the sidecar option saves a separate .srt file.")
+        self.combo_subtitles.currentTextChanged.connect(lambda: self.save_current_settings())
+        form_format.addRow("Subtitles:", self.combo_subtitles)
+
+        self.entry_subtitle_langs = QLineEdit()
+        self.entry_subtitle_langs.setPlaceholderText("en  (comma separated, or 'all')")
+        self.entry_subtitle_langs.textChanged.connect(lambda: self.save_current_settings())
+        form_format.addRow("Languages:", self.entry_subtitle_langs)
         content_lay.addWidget(self.grp_format)
 
         # Section 3: Appearance and Notifications
@@ -635,6 +754,15 @@ class MainWindow(QMainWindow):
         appearance_box_lay.addWidget(self.chk_monitor_clip)
         appearance_box_lay.addWidget(self.chk_completion_sound)
         appearance_box_lay.addWidget(self.chk_batch_notify)
+
+        post_batch_form = QFormLayout()
+        self.combo_post_batch = NoScrollComboBox()
+        self.combo_post_batch.addItems(POST_BATCH_ACTIONS)
+        self.combo_post_batch.setToolTip(
+            "Runs once when the last item of a batch finishes or fails.")
+        self.combo_post_batch.currentTextChanged.connect(lambda: self.save_current_settings())
+        post_batch_form.addRow("When the batch finishes:", self.combo_post_batch)
+        appearance_box_lay.addLayout(post_batch_form)
         content_lay.addWidget(self.grp_appearance)
 
         # Section 4: Application Updates
@@ -713,6 +841,12 @@ class MainWindow(QMainWindow):
         btn_cancel_all.setProperty("variant", "danger")
         btn_cancel_all.clicked.connect(self.cancel_all_tasks)
         queue_layout.addWidget(btn_cancel_all)
+
+        self.btn_retry_failed = QPushButton("Retry Failed")
+        self.btn_retry_failed.setToolTip("Re-queue every row that ended in a Failed state")
+        self.btn_retry_failed.clicked.connect(self.retry_all_failed)
+        self.btn_retry_failed.setEnabled(False)
+        queue_layout.addWidget(self.btn_retry_failed)
 
         btn_clear_completed = QPushButton("Clear Completed")
         btn_clear_completed.clicked.connect(self.clear_completed_tasks)
@@ -875,10 +1009,31 @@ class MainWindow(QMainWindow):
             (self.chk_confirm_exit, "confirm_exit_downloading", True),
             (self.chk_restore_links, "restore_links", False),
             (self.chk_aria2, "use_aria2", False),
+            (self.chk_expand_playlists, "expand_playlists", True),
+            (self.chk_skip_existing, "skip_existing", True),
         ):
             chk.blockSignals(True)
             chk.setChecked(bool(self.settings.get(key, default)))
             chk.blockSignals(False)
+
+        for combo, key, default in (
+            (self.combo_speed_limit, "speed_limit", "No limit"),
+            (self.combo_cookies_mode, "cookies_mode", "Disabled"),
+            (self.combo_cookies_browser, "cookies_browser", "chrome"),
+            (self.combo_playlist_limit, "playlist_item_limit", "200 videos"),
+            (self.combo_subtitles, "subtitles", "Off"),
+            (self.combo_post_batch, "post_batch_action", "Do nothing"),
+        ):
+            combo.blockSignals(True)
+            saved = self.settings.get(key, default)
+            combo.setCurrentText(saved if saved else default)
+            combo.blockSignals(False)
+
+        self.entry_subtitle_langs.blockSignals(True)
+        self.entry_subtitle_langs.setText(self.settings.get("subtitle_langs", "en"))
+        self.entry_subtitle_langs.blockSignals(False)
+        self.entry_cookies_file.setText(self.settings.get("cookies_file", ""))
+        self._sync_cookies_widgets()
 
     def save_current_settings(self, immediate: bool = False):
         if getattr(self, "_applying_settings", False):
@@ -897,6 +1052,16 @@ class MainWindow(QMainWindow):
             "confirm_exit_downloading": self.chk_confirm_exit.isChecked(),
             "restore_links": self.chk_restore_links.isChecked(),
             "use_aria2": self.chk_aria2.isChecked(),
+            "expand_playlists": self.chk_expand_playlists.isChecked(),
+            "skip_existing": self.chk_skip_existing.isChecked(),
+            "speed_limit": self.combo_speed_limit.currentText(),
+            "cookies_mode": self.combo_cookies_mode.currentText(),
+            "cookies_browser": self.combo_cookies_browser.currentText(),
+            "cookies_file": self.entry_cookies_file.text().strip(),
+            "playlist_item_limit": self.combo_playlist_limit.currentText(),
+            "subtitles": self.combo_subtitles.currentText(),
+            "subtitle_langs": self.entry_subtitle_langs.text().strip() or "en",
+            "post_batch_action": self.combo_post_batch.currentText(),
         }
         if "Audio" in fmt:
             updates["audio_quality"] = current_q
@@ -928,12 +1093,12 @@ class MainWindow(QMainWindow):
         folder = self.entry_path.text()
         if not os.path.exists(folder):
             os.makedirs(folder, exist_ok=True)
-        os.startfile(folder)
+        open_path(folder)
 
     def open_file(self, file_path):
         if file_path and os.path.exists(file_path):
             try:
-                os.startfile(file_path)
+                open_path(file_path)
             except Exception as e:
                 log.error(f"Failed to play file {file_path}: {e}")
                 self.open_downloads_folder()
@@ -943,7 +1108,10 @@ class MainWindow(QMainWindow):
     def play_finished_sound(self):
         """Triggers a gentle asynchronous system notification sound."""
         try:
-            winsound.PlaySound("SystemAsterisk", winsound.SND_ALIAS | winsound.SND_ASYNC)
+            if winsound is not None:
+                winsound.PlaySound("SystemAsterisk", winsound.SND_ALIAS | winsound.SND_ASYNC)
+            else:
+                QApplication.beep()
         except Exception:
             pass
 
@@ -1081,7 +1249,7 @@ class MainWindow(QMainWindow):
             menu.addSeparator()
 
         act_copy = menu.addAction("Copy URL")
-        act_retry = act_cancel = act_pause = act_rename = None
+        act_retry = act_cancel = act_pause = act_rename = act_format = None
         task_state = self.task_data.get(task_id, {}).get('state')
         if status_text == "Complete":
             pass
@@ -1089,6 +1257,7 @@ class MainWindow(QMainWindow):
             act_retry = menu.addAction("Retry Download")
         elif task_state == 'ready':
             act_rename = menu.addAction("Rename Output")
+            act_format = menu.addAction("Change Format...")
         else:
             worker = self.active_workers.get(task_id)
             is_paused = getattr(worker, 'is_paused', False) if worker else False
@@ -1105,12 +1274,14 @@ class MainWindow(QMainWindow):
         elif chosen == act_folder:
             folder = os.path.dirname(file_path)
             if os.path.isdir(folder):
-                os.startfile(folder)
+                open_path(folder)
         elif chosen == act_copy:
             url = self.task_data.get(task_id, {}).get('url', '')
             QApplication.clipboard().setText(url)
         elif chosen == act_rename:
             self.rename_task(task_id)
+        elif chosen == act_format:
+            self.change_row_format(task_id)
         elif chosen == act_pause:
             self.toggle_pause_task(task_id)
         elif chosen == act_retry:
@@ -1189,6 +1360,7 @@ class MainWindow(QMainWindow):
 
         worker = TitlePreviewWorker(text.split('\n'))
         worker.signals.fetched.connect(self.update_title_previews)
+        worker.signals.raw_titles.connect(self._store_raw_titles)
         self.threadpool.start(worker)
 
     def update_title_previews(self, previews: list):
@@ -1332,6 +1504,7 @@ class MainWindow(QMainWindow):
         self.update_global_progress()
         self.update_status_summary()
         self.sync_taskbar_progress()
+        self._update_retry_failed_button()
 
     def sync_taskbar_progress(self):
         """Mirrors overall batch progress onto the Windows taskbar button."""
@@ -1381,7 +1554,7 @@ class MainWindow(QMainWindow):
             if not u:
                 continue
             p = raw_preview_lines[i].strip() if i < len(raw_preview_lines) else ""
-            if not p or p in ["Failed to load title", "Invalid URL"]:
+            if not p or p in ["Failed to load title", "Invalid URL", PLAYLIST_PREVIEW_LABEL]:
                 p = None
             entries.append((u, p))
 
@@ -1404,6 +1577,15 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Nothing New", "All links are already in the download queue.")
             return
 
+        cookie_problem = self._cookie_source_problem()
+        if cookie_problem:
+            answered = QMessageBox.question(
+                self, "Cookies not available",
+                cookie_problem + "\n\nDownload without signing in?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if answered != QMessageBox.Yes:
+                return
+
         if skipped_dupes:
             self.desktop_toast.show_notification(
                 "Duplicates Skipped",
@@ -1414,17 +1596,22 @@ class MainWindow(QMainWindow):
         os.makedirs(self.entry_path.text(), exist_ok=True)
         self.save_current_settings()
 
-        options = {
-            'download_path': self.entry_path.text(),
-            'format': self.combo_format.currentText(),
-            'quality': self.combo_quality.currentText(),
-            'audio_boost': self.combo_boost.currentText(),
-            'use_aria2': bool(self.settings.get("use_aria2", False)),
-            'queued_time': None
-        }
+        options = self._download_options()
+        expand_playlists = self.chk_expand_playlists.isChecked()
 
+        playlist_urls = []
         for url, cached_title in unique_entries:
-            self.add_task(url, options, title=cached_title)
+            if expand_playlists and is_expandable_playlist(url):
+                playlist_urls.append(url)
+                continue
+            self.add_task(
+                url, options, title=cached_title,
+                raw_title=self._raw_titles.get(clean_youtube_url(url), ''))
+
+        if playlist_urls:
+            self._batch_action_done = False
+            self._start_playlist_expansion(playlist_urls, options)
+
         self.url_input.clear()
         self.preview_input.clear()
 
@@ -1490,6 +1677,7 @@ class MainWindow(QMainWindow):
             return
 
         self.batch_start_time = time.time()
+        self._batch_action_done = False
         for task_id in task_ids:
             info = self.task_data[task_id]
             row = self.row_mapping[task_id]
@@ -1659,7 +1847,7 @@ class MainWindow(QMainWindow):
                 return tid
         return None
 
-    def add_task(self, url, options, title=None):
+    def add_task(self, url, options, title=None, raw_title=None):
         task_id = str(uuid.uuid4())
         options_snapshot = dict(options)
         self.task_data[task_id] = {
@@ -1702,7 +1890,7 @@ class MainWindow(QMainWindow):
 
         # INSTANT 0ms LAUNCH: Bypasses double-pass network roundtrips
         pre_title = title if title else f"Downloading..."
-        pre_data = {'title': pre_title}
+        pre_data = {'title': pre_title, 'raw_title': raw_title or ''}
         self.task_data[task_id]['pre_data'] = pre_data
 
         self.filter_table(self.search_input.text())
@@ -1726,6 +1914,7 @@ class MainWindow(QMainWindow):
         url = task_info['url']
         options = task_info['options']
         task_info['state'] = 'running'
+        self._batch_action_done = False
         options['output_name'] = task_info.get('output_name') or ''
         
         # Reset row aesthetics to standard active download state
@@ -1883,6 +2072,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(2000, lambda: self.remove_task_row(task_id))
 
         self._cleanup_worker(task_id)
+        self._finish_batch_if_idle()
 
         # Play system sound notification and show total batch duration when all tasks finish
         if len(self.active_workers) == 0:
@@ -1919,6 +2109,7 @@ class MainWindow(QMainWindow):
             
         self.refresh_aggregates()
         self._cleanup_worker(task_id)
+        self._finish_batch_if_idle()
 
         # Play system sound notification if all active processing is finished (even on fail)
         if len(self.active_workers) == 0 and self.chk_completion_sound.isChecked():
@@ -1930,3 +2121,258 @@ class MainWindow(QMainWindow):
     def _cleanup_worker(self, task_id):
         if task_id in self.active_workers:
             del self.active_workers[task_id]
+
+    def _update_retry_failed_button(self):
+        has_failed = any(info.get('state') == 'failed' for info in self.task_data.values())
+        self.btn_retry_failed.setEnabled(has_failed)
+
+    def retry_all_failed(self):
+        """Re-queues every row that ended in a Failed state in one click."""
+        failed_ids = [
+            task_id for task_id, info in self.task_data.items()
+            if info.get('state') == 'failed' and task_id in self.row_mapping
+        ]
+        if not failed_ids:
+            QMessageBox.information(self, "Retry Failed", "No failed downloads in the queue.")
+            return
+        self._batch_action_done = False
+        for task_id in failed_ids:
+            self.retry_task(task_id)
+        self.desktop_toast.show_notification(
+            "Retrying Failed Items",
+            f"{len(failed_ids)} item{'s' if len(failed_ids) != 1 else ''} re-queued.",
+            2600,
+        )
+
+    def _finish_batch_if_idle(self):
+        """Runs the post-batch action once, when nothing is left to download."""
+        if self._batch_action_done or self.active_workers or self._pending_playlists:
+            return
+        if self._ready_task_ids() or not self.task_data:
+            return
+        self._batch_action_done = True
+        self._run_post_batch_action()
+
+    def _run_post_batch_action(self):
+        action = self.combo_post_batch.currentText()
+        if action == "Open download folder":
+            self.open_downloads_folder()
+        elif action == "Sleep":
+            self._request_suspend(hibernate=False)
+        elif action == "Hibernate":
+            self._request_suspend(hibernate=True)
+        elif action == "Shut down":
+            self._request_shutdown()
+
+    def _request_suspend(self, hibernate: bool):
+        label = "hibernate" if hibernate else "sleep"
+        self.desktop_toast.show_notification("Batch finished", f"The PC will {label} now.", 4000)
+        # SetSuspendState(Hibernate, ForceCritical, DisableWakeEvent)
+        flags = "1,1,0" if hibernate else "0,1,0"
+        try:
+            command = (["rundll32.exe", "powrprof.dll,SetSuspendState", flags] if IS_WINDOWS
+                       else ["systemctl", "hibernate" if hibernate else "suspend"])
+            subprocess.run(command, check=True)
+        except (OSError, subprocess.CalledProcessError) as exc:
+            log.error("Could not request %s: %s", label, exc)
+
+    def _request_shutdown(self):
+        # The 30 second grace period keeps this reversible with `shutdown /a`.
+        self.desktop_toast.show_notification(
+            "Shutting down in 30 seconds" if IS_WINDOWS else "Shutting down in one minute",
+            "Run 'shutdown /a' to cancel." if IS_WINDOWS else "Run 'shutdown -c' to cancel.",
+            6000,
+        )
+        try:
+            command = ["shutdown", "/s", "/t", "30"] if IS_WINDOWS else ["shutdown", "-h", "+1"]
+            subprocess.run(command, check=True)
+        except (OSError, subprocess.CalledProcessError) as exc:
+            log.error("Could not request shutdown: %s", exc)
+
+    def _sync_cookies_widgets(self):
+        mode = self.combo_cookies_mode.currentText()
+        self.network_form.setRowVisible(self.combo_cookies_browser, mode == "From browser")
+        self.network_form.setRowVisible(self.cookies_file_row, mode == "cookies.txt file")
+
+    def _cookie_source_problem(self) -> str | None:
+        """Explains why a configured cookie source would silently send nothing."""
+        mode = self.combo_cookies_mode.currentText()
+        if mode == "cookies.txt file":
+            path = self.entry_cookies_file.text().strip()
+            if path and os.path.isfile(path):
+                return None
+            return "The selected cookies.txt file does not exist."
+        return None
+
+    def _on_cookies_mode_changed(self, _value: str = ""):
+        self._sync_cookies_widgets()
+        self.save_current_settings(immediate=True)
+
+    def browse_cookies_file(self):
+        path, _selected = QFileDialog.getOpenFileName(
+            self, "Select cookies.txt", os.path.expanduser("~"),
+            "Cookie files (*.txt);;All files (*.*)")
+        if path:
+            self.entry_cookies_file.setText(path)
+            self.save_current_settings(immediate=True)
+
+    def clear_cookies_file(self):
+        self.entry_cookies_file.clear()
+        self.save_current_settings(immediate=True)
+
+    def _download_options(self) -> dict:
+        """Snapshot of every setting a worker needs, shared by all queue entry points."""
+        return {
+            'download_path': self.entry_path.text(),
+            'format': self.combo_format.currentText(),
+            'quality': self.combo_quality.currentText(),
+            'audio_boost': self.combo_boost.currentText(),
+            'use_aria2': bool(self.settings.get("use_aria2", False)),
+            'speed_limit': self.combo_speed_limit.currentText(),
+            'cookies_mode': self.combo_cookies_mode.currentText(),
+            'cookies_browser': self.combo_cookies_browser.currentText(),
+            'cookies_file': self.entry_cookies_file.text().strip(),
+            'subtitles': self.combo_subtitles.currentText(),
+            'subtitle_langs': self.entry_subtitle_langs.text().strip() or "en",
+            'skip_existing': self.chk_skip_existing.isChecked(),
+            'queued_time': None,
+        }
+
+    def _playlist_item_limit(self) -> int:
+        digits = ''.join(ch for ch in self.combo_playlist_limit.currentText() if ch.isdigit())
+        return int(digits) if digits else 0
+
+    def _store_raw_titles(self, raw_titles: dict):
+        if raw_titles:
+            self._raw_titles.update(raw_titles)
+
+    def _start_playlist_expansion(self, playlist_urls: list, options: dict):
+        from .downloader import PlaylistExpandWorker
+
+        self._pending_playlists.update(playlist_urls)
+        self.statusBar.showMessage(f"Expanding {len(playlist_urls)} playlist link(s)...", 8000)
+        worker = PlaylistExpandWorker(
+            playlist_urls,
+            build_cookies_options(
+                options.get('cookies_mode'),
+                options.get('cookies_browser'),
+                options.get('cookies_file'),
+            ),
+            self._playlist_item_limit(),
+        )
+        worker.signals.entries.connect(
+            lambda source, entries: self._on_playlist_entries(source, entries, options))
+        worker.signals.failed.connect(self._on_playlist_failed)
+        self._expansion_workers.add(worker)
+        self.threadpool.start(worker)
+
+    def _on_playlist_entries(self, source_url: str, entries: list, options: dict):
+        self._pending_playlists.discard(source_url)
+        self._release_finished_expansions()
+        known_urls = {info.get('url') for info in self.task_data.values()}
+        added = 0
+        for video_url, display_title, raw_title in entries:
+            if video_url in known_urls:
+                continue
+            known_urls.add(video_url)
+            self.add_task(video_url, options, title=display_title or None,
+                          raw_title=raw_title or '')
+            added += 1
+        self.statusBar.showMessage(f"Playlist expanded: {added} new item(s) queued.", 8000)
+        self.desktop_toast.show_notification(
+            "Playlist Expanded",
+            f"{added} video{'s' if added != 1 else ''} added to the queue.",
+            3000,
+        )
+
+    def _on_playlist_failed(self, source_url: str, message: str):
+        self._pending_playlists.discard(source_url)
+        self._release_finished_expansions()
+        self.statusBar.showMessage(f"Could not expand a playlist: {message}", 10000)
+
+    def _release_finished_expansions(self):
+        if not self._pending_playlists:
+            self._expansion_workers.clear()
+
+    def change_row_format(self, task_id: str):
+        """Gives one Ready row its own format/quality instead of the global choice."""
+        info = self.task_data.get(task_id)
+        row = self.row_mapping.get(task_id)
+        if not info or row is None or info.get('state') != 'ready':
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Row Download Options")
+        dialog.resize(400, 160)
+        layout = QVBoxLayout(dialog)
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignRight)
+
+        combo_format = NoScrollComboBox()
+        combo_format.addItems(FORMAT_CHOICES)
+        combo_format.setCurrentText(info['options'].get('format') or self.combo_format.currentText())
+        combo_quality = NoScrollComboBox()
+
+        def sync_quality(format_name: str):
+            choices = self.audio_qualities if "Audio" in format_name else self.video_qualities
+            combo_quality.blockSignals(True)
+            combo_quality.clear()
+            combo_quality.addItems(choices)
+            wanted = info['options'].get('quality')
+            combo_quality.setCurrentText(wanted if wanted in choices else choices[0])
+            combo_quality.blockSignals(False)
+
+        combo_format.currentTextChanged.connect(sync_quality)
+        sync_quality(combo_format.currentText())
+        form.addRow("Format:", combo_format)
+        form.addRow("Quality:", combo_quality)
+        layout.addLayout(form)
+
+        buttons = QHBoxLayout()
+        btn_global = QPushButton("Use Global Setting")
+        btn_apply = QPushButton("Apply")
+        btn_apply.setProperty("variant", "primary")
+        buttons.addStretch()
+        buttons.addWidget(btn_global)
+        buttons.addWidget(btn_apply)
+        layout.addLayout(buttons)
+
+        btn_global.clicked.connect(lambda: self._apply_row_format(
+            task_id, self.combo_format.currentText(), self.combo_quality.currentText(), False))
+        btn_global.clicked.connect(dialog.accept)
+        btn_apply.clicked.connect(lambda: self._apply_row_format(
+            task_id, combo_format.currentText(), combo_quality.currentText(), True))
+        btn_apply.clicked.connect(dialog.accept)
+        dialog.exec()
+
+    def _apply_row_format(self, task_id: str, fmt: str, quality: str, is_override: bool):
+        info = self.task_data.get(task_id)
+        row = self.row_mapping.get(task_id)
+        # The row may have started downloading while the dialog was open
+        if not info or row is None or info.get('state') != 'ready':
+            return
+        info['options']['format'] = fmt
+        info['options']['quality'] = quality
+        info['format_override'] = bool(is_override) and (
+            fmt != self.combo_format.currentText()
+            or quality != self.combo_quality.currentText()
+        )
+        self._refresh_row_ready_label(task_id)
+        self.refresh_aggregates()
+
+    def _refresh_row_ready_label(self, task_id: str):
+        info = self.task_data.get(task_id)
+        row = self.row_mapping.get(task_id)
+        if not info or row is None:
+            return
+        status_item = self.table.item(row, COL_STATUS)
+        if not status_item:
+            return
+        if info.get('format_override'):
+            short = (info['options'].get('format') or '').replace(' Video', '').replace(' Audio', '')
+            quality = info['options'].get('quality') or ''
+            status_item.setText(f"Ready ({short} - {quality})")
+            status_item.setToolTip("This row uses its own format instead of the global one.")
+        else:
+            status_item.setText("Ready")
+            status_item.setToolTip("")

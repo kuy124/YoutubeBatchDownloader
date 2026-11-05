@@ -8,7 +8,7 @@ import tempfile
 import unittest
 import uuid
 import zipfile
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from unittest import mock
 from pathlib import Path
 
@@ -25,6 +25,8 @@ from app.app_update import (
     _REPLACEMENT_SCRIPT,
 )
 from app.downloader import build_output_template, is_untrusted_path_error
+from tests.gui_env import isolated_settings
+
 from app.gui import COL_OUTPUT_NAME, MainWindow
 from app.themes import THEMES, build_theme
 from app.updater import RELEASES_URL, UpdateWorker, parse_version, select_windows_asset
@@ -243,7 +245,8 @@ class ReleaseTests(unittest.TestCase):
         worker.signals.update_available.connect(updates.append)
         worker.signals.error.connect(errors.append)
         worker.signals.no_update.connect(unchanged.append)
-        with mock.patch('app.updater.urllib.request.urlopen', side_effect=[latest, assets]) as request:
+        with mock.patch('app.updater.IS_WINDOWS', True), \
+                mock.patch('app.updater.urllib.request.urlopen', side_effect=[latest, assets]) as request:
             worker.run()
         urls = [call.args[0].full_url for call in request.call_args_list]
         self.assertEqual(urls[0], RELEASES_URL + '/latest')
@@ -293,6 +296,9 @@ class QueueTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        self._stack = ExitStack()
+        self.addCleanup(self._stack.close)
+        self._stack.enter_context(isolated_settings())
         self.window = MainWindow()
 
     def tearDown(self):

@@ -4,8 +4,9 @@ from urllib.parse import unquote, urlsplit
 import urllib.request
 
 from PySide6.QtCore import QObject, QRunnable, Signal
+from .platform_compat import IS_WINDOWS
 
-APP_VERSION = "v1.9.5"
+APP_VERSION = "v1.9.6"
 RELEASES_URL = "https://github.com/kuy124/YoutubeBatchDownloader/releases"
 USER_AGENT = "YouTubeBatchDownloader-Updater"
 
@@ -55,6 +56,8 @@ def select_windows_asset(assets: list) -> dict:
     for asset in assets or []:
         name = str(asset.get('name') or '')
         lower = name.lower()
+        if 'linux' in lower:
+            continue
         if "youtubebatchdownloader" not in lower:
             continue
         if lower.endswith('.zip'):
@@ -68,6 +71,18 @@ def select_windows_asset(assets: list) -> dict:
     if not candidates:
         raise ValueError("This release does not contain a Windows application asset.")
     return min(candidates, key=lambda item: (item[0], item[1]))[2]
+
+
+def select_linux_asset(assets: list) -> dict:
+    candidates = []
+    for asset in assets or []:
+        name = str(asset.get('name') or '').lower()
+        if ('youtubebatchdownloader' in name and 'linux-x86_64' in name
+                and name.endswith(('.appimage', '.tar.gz')) and asset.get('browser_download_url')):
+            candidates.append((0 if name.endswith('.appimage') else 1, name, asset))
+    if candidates:
+        return min(candidates, key=lambda item: (item[0], item[1]))[2]
+    raise ValueError("This release does not contain a Linux x86_64 application asset.")
 
 
 class UpdateSignals(QObject):
@@ -103,7 +118,7 @@ class UpdateWorker(QRunnable):
             with urllib.request.urlopen(req, timeout=8) as resp:
                 parser = ReleaseAssetsParser(tag)
                 parser.feed(resp.read().decode('utf-8'))
-            asset = select_windows_asset(parser.assets)
+            asset = (select_windows_asset if IS_WINDOWS else select_linux_asset)(parser.assets)
             digest = str(asset.get('digest') or '')
             if not re.fullmatch(r'sha256:[0-9a-fA-F]{64}', digest):
                 raise ValueError("The release asset does not provide a SHA-256 digest.")

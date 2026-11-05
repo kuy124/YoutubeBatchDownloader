@@ -37,11 +37,12 @@ TBPF_INDETERMINATE = 0x00000001
 TBPF_NORMAL = 0x00000002
 
 # Vtable prototypes (index follows ITaskbarList -> ITaskbarList2 -> ITaskbarList3 order)
-_HR_INIT_PROTO = ctypes.WINFUNCTYPE(ctypes.HRESULT, ctypes.c_void_p)                                    # idx 3
-_SET_STATE_PROTO = ctypes.WINFUNCTYPE(ctypes.HRESULT, ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p)  # idx 8
-_SET_VALUE_PROTO = ctypes.WINFUNCTYPE(
-    ctypes.HRESULT, ctypes.c_void_p, ctypes.c_ulonglong, ctypes.c_ulonglong                             # idx 9
-)
+if sys.platform == "win32":
+    _HR_INIT_PROTO = ctypes.WINFUNCTYPE(ctypes.HRESULT, ctypes.c_void_p)
+    _SET_STATE_PROTO = ctypes.WINFUNCTYPE(ctypes.HRESULT, ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p)
+    _SET_VALUE_PROTO = ctypes.WINFUNCTYPE(
+        ctypes.HRESULT, ctypes.c_void_p, ctypes.c_ulonglong, ctypes.c_ulonglong
+    )
 
 
 class WinTaskbarProgress:

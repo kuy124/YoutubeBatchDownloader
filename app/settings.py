@@ -45,6 +45,16 @@ class Settings:
             "confirm_exit_downloading": True,
             "restore_links": False,
             "saved_links": "",
+            "expand_playlists": True,
+            "playlist_item_limit": "200 videos",
+            "skip_existing": True,
+            "speed_limit": "No limit",
+            "cookies_mode": "Disabled",
+            "cookies_browser": "chrome",
+            "cookies_file": "",
+            "subtitles": "Off",
+            "subtitle_langs": "en",
+            "post_batch_action": "Do nothing",
             "threads": max(12, (os.cpu_count() or 4) * 2)
         }
         self.load()
@@ -71,6 +81,8 @@ class Settings:
                 with open(self.settings_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     self.config.update(data)
+                    if self.config.get("cookies_mode") == "From extension":
+                        self.config["cookies_mode"] = "Disabled"
                 log.info("Settings loaded successfully.")
             except Exception as e:
                 log.error(f"Failed to load settings: {str(e)}")

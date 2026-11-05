@@ -165,6 +165,7 @@ class StartupInstrumentationTests(unittest.TestCase):
                 splash.close()
         application.processEvents()
 
+    @unittest.skipUnless(os.name == "nt", "Windows reparse points")
     def test_reparse_point_path_entries_are_not_inherited_by_child_tools(self):
         safe = r"C:\\Safe Tools"
         unsafe = r"C:\\Untrusted Junction"
@@ -185,7 +186,7 @@ class StartupInstrumentationTests(unittest.TestCase):
             install_dir.mkdir()
             with mock.patch.object(utils.sys, "frozen", True, create=True), \
                     mock.patch.object(utils.sys, "executable", str(install_dir / "YouTubeBatchDownloader.exe")), \
-                    mock.patch.dict(os.environ, {"LOCALAPPDATA": str(local_app_data)}, clear=False):
+                    mock.patch.dict(os.environ, {"LOCALAPPDATA": str(local_app_data), "XDG_DATA_HOME": str(local_app_data)}, clear=False):
                 self.assertEqual(Path(utils.get_install_dir()), install_dir)
                 self.assertEqual(Path(utils.get_data_dir()), local_app_data / "YouTubeBatchDownloader")
 
@@ -202,7 +203,7 @@ class StartupInstrumentationTests(unittest.TestCase):
             (data_dir / "runtime" / "yt-dlp" / "old.txt").write_text("new", encoding="utf-8")
             with mock.patch.object(utils.sys, "frozen", True, create=True), \
                     mock.patch.object(utils.sys, "executable", str(install_dir / "YouTubeBatchDownloader.exe")), \
-                    mock.patch.dict(os.environ, {"LOCALAPPDATA": str(local_app_data)}, clear=False):
+                    mock.patch.dict(os.environ, {"LOCALAPPDATA": str(local_app_data), "XDG_DATA_HOME": str(local_app_data)}, clear=False):
                 self.assertTrue(utils.migrate_legacy_data())
             self.assertEqual((data_dir / "runtime" / "yt-dlp" / "old.txt").read_text(encoding="utf-8"), "new")
             self.assertEqual((data_dir / "settings.json").read_text(encoding="utf-8"), '{"theme":"Dark"}')

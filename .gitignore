@@ -24,8 +24,12 @@ tests/runtime_tmp/
 settings.json
 tools/
 
+# Private login cookies
+cookies.txt
+
 # Interrupted application-update staging files
 *.update-download
 *.update-new
 *.update-new.part
 *.backup-*
+.venv-linux/

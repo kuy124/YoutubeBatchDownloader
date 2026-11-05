@@ -9,9 +9,13 @@ import yt_dlp
 from PySide6.QtCore import QRunnable, QObject, Signal
 from .utils import (
     build_audio_boost_filter,
+    build_cookies_options,
+    build_subtitle_options,
     clean_youtube_url,
     escape_yt_dlp_template_literal,
     fetch_oembed_title,
+    fetch_oembed_title_pair,
+    find_existing_output,
     format_display_title,
     format_elapsed_words,
     format_hms,
@@ -19,7 +23,14 @@ from .utils import (
     get_ffmpeg_path,
     image_to_jpeg_bytes,
     insecure_ssl_context,
+    is_expandable_playlist,
     is_youtube_url,
+    js_runtime_options,
+    parse_rate_limit,
+    explain_cookie_failure,
+    playlist_url_for_expansion,
+    private_cookiefile,
+    PLAYLIST_PREVIEW_LABEL,
     resolve_uploader,
     sanitize_output_stem,
 )
@@ -28,6 +39,7 @@ from .converter import convert_m4a_to_mp3_fast, embed_wav_metadata
 
 class TitlePreviewSignals(QObject):
     fetched = Signal(list)
+    raw_titles = Signal(dict)   # clean_url -> untouched video title
 
 # In-memory cache so re-pasting the same links never repeats network lookups
 _TITLE_CACHE = {}
@@ -40,11 +52,11 @@ def _cached_title(clean_url: str):
         return _TITLE_CACHE.get(clean_url)
 
 
-def _store_title(clean_url: str, title: str):
+def _store_title(clean_url: str, title: str, raw_title: str = ""):
     with _TITLE_CACHE_LOCK:
         if len(_TITLE_CACHE) >= _TITLE_CACHE_LIMIT:
             _TITLE_CACHE.clear()
-        _TITLE_CACHE[clean_url] = title
+        _TITLE_CACHE[clean_url] = (title, raw_title or "")
 
 
 class TitlePreviewWorker(QRunnable):
@@ -53,12 +65,17 @@ class TitlePreviewWorker(QRunnable):
         self.raw_lines = raw_lines
         self.signals = TitlePreviewSignals()
 
-    def _fetch_single_title(self, line: str) -> str:
+    def _fetch_single_title(self, line: str) -> tuple:
+        """Returns (display_title, raw_title) for one input line."""
         line = line.strip()
         if not line:
-            return ""
+            return "", ""
         if not is_youtube_url(line):
-            return "Invalid URL"
+            return "Invalid URL", ""
+        if is_expandable_playlist(line):
+            # A collection resolves into many rows later, so there is no single
+            # title to preview and no point paying for a metadata roundtrip.
+            return PLAYLIST_PREVIEW_LABEL, ""
 
         clean_url = clean_youtube_url(line)
 
@@ -67,10 +84,10 @@ class TitlePreviewWorker(QRunnable):
             return cached
 
         # FAST PATH 1: Ultra-fast 50ms YouTube oEmbed JSON API
-        oembed_title = fetch_oembed_title(clean_url)
-        if oembed_title:
-            _store_title(clean_url, oembed_title)
-            return oembed_title
+        display, raw = fetch_oembed_title_pair(clean_url)
+        if display:
+            _store_title(clean_url, display, raw)
+            return display, raw or ""
 
         # FAST PATH 2: Fallback to lightweight yt-dlp
         ydl_opts = {
@@ -87,25 +104,101 @@ class TitlePreviewWorker(QRunnable):
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(clean_url, download=False)
                 if not info:
-                    return "Failed to load title"
+                    return "Failed to load title", ""
                 title = info.get('title', 'Unknown Title')
                 resolved = format_display_title(title, resolve_uploader(info))
-                _store_title(clean_url, resolved)
-                return resolved
+                _store_title(clean_url, resolved, title)
+                return resolved, title
         except Exception:
-            return "Failed to load title"
+            return "Failed to load title", ""
 
     def run(self):
         if not self.raw_lines:
             self.signals.fetched.emit([])
+            self.signals.raw_titles.emit({})
             return
 
         # Fetch all link titles concurrently in parallel
         max_workers = min(12, len(self.raw_lines))
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            previews = list(executor.map(self._fetch_single_title, self.raw_lines))
+            results = list(executor.map(self._fetch_single_title, self.raw_lines))
+
+        previews = [display for display, _raw in results]
+        raw_titles = {}
+        for line, (_display, raw) in zip(self.raw_lines, results):
+            if raw:
+                raw_titles[clean_youtube_url(line.strip())] = raw
 
         self.signals.fetched.emit(previews)
+        self.signals.raw_titles.emit(raw_titles)
+
+
+class PlaylistSignals(QObject):
+    entries = Signal(str, list)   # source_url, [(video_url, title), ...]
+    failed = Signal(str, str)     # source_url, error_msg
+
+
+class PlaylistExpandWorker(QRunnable):
+    """Resolves playlist/channel links into individual videos without downloading."""
+
+    def __init__(self, playlist_urls: list, cookie_options: dict = None, item_limit: int = 0):
+        super().__init__()
+        self.playlist_urls = playlist_urls
+        self.cookie_options = cookie_options or {}
+        self.item_limit = max(0, int(item_limit or 0))
+        self.signals = PlaylistSignals()
+
+    def _expand_one(self, url: str) -> list:
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'skip_download': True,
+            'extract_flat': 'in_playlist',
+            'socket_timeout': 15,
+            'retries': 5,
+            'cachedir': False,
+            **self.cookie_options,
+        }
+        if self.item_limit:
+            ydl_opts['playlistend'] = self.item_limit
+
+        with private_cookiefile(ydl_opts.get('cookiefile')) as cookiefile:
+            with yt_dlp.YoutubeDL({**ydl_opts, 'cookiefile': cookiefile}) as ydl:
+                info = ydl.extract_info(playlist_url_for_expansion(url), download=False)
+        if not info:
+            return []
+
+        entries = []
+        for item in info.get('entries') or []:
+            if not item:
+                continue
+            video_url = item.get('url') or ''
+            if not video_url and item.get('id'):
+                video_url = f"https://www.youtube.com/watch?v={item['id']}"
+            if not video_url:
+                continue
+            title = item.get('title') or ''
+            uploader = resolve_uploader(item)
+            entries.append((
+                video_url,
+                format_display_title(title, uploader) if title else '',
+                title,
+            ))
+        return entries
+
+    def run(self):
+        for url in self.playlist_urls:
+            try:
+                entries = self._expand_one(url)
+            except Exception as exc:
+                log.warning("Playlist expansion failed for %s: %s", url, exc)
+                hint = explain_cookie_failure(str(exc))
+                self.signals.failed.emit(url, hint or str(exc)[:160])
+                continue
+            if entries:
+                self.signals.entries.emit(url, entries)
+            else:
+                self.signals.failed.emit(url, "No videos were found in this link.")
 
 class MetadataSignals(QObject):
     finished = Signal(str, dict)  # task_id, metadata_dict
@@ -280,6 +373,15 @@ def build_output_template(download_path: str, output_name: str, format_name: str
         return os.path.join(download_path, '%(title)s.%(ext)s')
     literal_name = escape_yt_dlp_template_literal(clean_name)
     return os.path.join(download_path, f'{literal_name}.%(ext)s')
+
+
+def container_for_format(fmt: str) -> str:
+    """Returns the output container a format produces, used for subtitle choices."""
+    if fmt in _VIDEO_FORMATS:
+        return _VIDEO_FORMATS[fmt][0]
+    if fmt in _AUDIO_FORMATS:
+        return ''
+    return _BEST_QUALITY_VIDEO[0]
 
 
 def is_untrusted_path_error(error: BaseException) -> bool:
@@ -699,6 +801,19 @@ class DownloadWorker(QRunnable):
             'status_text': 'Downloading'
         })
 
+        if self.options.get('skip_existing', True):
+            existing = find_existing_output(
+                self.options.get('download_path') or '',
+                self.pre_data.get('raw_title') or '',
+                self.options.get('format') or '',
+            )
+            if existing and not self.is_cancelled:
+                log.info("Task %s skipped; %s already exists.", self.task_id, existing)
+                self.final_filename = existing
+                self.signals.finished.emit(
+                    self.task_id, existing, "Already in your downloads folder - skipped.", "0 seconds")
+                return
+
         ffmpeg_path = get_ffmpeg_path()
         if ffmpeg_path:
             ffmpeg_dir = os.path.dirname(ffmpeg_path)
@@ -762,6 +877,19 @@ class DownloadWorker(QRunnable):
         boost_str = self.options.get('audio_boost', '100% (Original)')
         boost_filter = build_audio_boost_filter(boost_str)
 
+        rate_limit = parse_rate_limit(self.options.get('speed_limit'))
+        if rate_limit:
+            # yt-dlp enforces this per connection, so the aggregate cap scales
+            # with the number of simultaneous rows in the pool.
+            ydl_opts['limit_rate'] = rate_limit
+            ydl_opts.pop('throttled_rate', None)
+
+        ydl_opts.update(build_cookies_options(
+            self.options.get('cookies_mode'),
+            self.options.get('cookies_browser'),
+            self.options.get('cookies_file'),
+        ))
+
         # Numeric parser for video resolution (height) & audio bitrate
         num_match = re.search(r'(\d+)', quality)
         parsed_num = num_match.group(1) if num_match else None
@@ -780,6 +908,17 @@ class DownloadWorker(QRunnable):
             fmt, video_format, audio_bitrate_num, audio_bitrate_str, boost_filter
         ))
 
+        subtitle_mode = self.options.get('subtitles', 'Off')
+        if subtitle_mode and subtitle_mode != 'Off' and "Audio" not in fmt:
+            subtitles = build_subtitle_options(
+                subtitle_mode,
+                self.options.get('subtitle_langs', 'en'),
+                container_for_format(fmt),
+            )
+            ydl_opts.update(subtitles['opts'])
+            if subtitles['postprocessors']:
+                ydl_opts['postprocessors'] = list(ydl_opts.get('postprocessors') or []) + subtitles['postprocessors']
+
         # --- Automatic Background Retry Loop ---
         max_auto_retries = 3
         for attempt in range(max_auto_retries + 1):
@@ -792,9 +931,14 @@ class DownloadWorker(QRunnable):
                 return
                 
             try:
-                # Single-pass download execution
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info_dict = ydl.extract_info(self.url, download=True)
+                # Single-pass download execution. Each attempt gets its own cookie
+                # copy so a retry never replays the token yt-dlp just wrote back,
+                # and its own runtime dict because yt-dlp prunes that one in place.
+                with private_cookiefile(ydl_opts.get('cookiefile')) as cookiefile:
+                    with yt_dlp.YoutubeDL({
+                        **ydl_opts, 'cookiefile': cookiefile, **js_runtime_options()
+                    }) as ydl:
+                        info_dict = ydl.extract_info(self.url, download=True)
 
                 # Format-specific post-processing passes; each returns False to abort
                 if fmt == "MP3 Audio" and info_dict:
@@ -846,7 +990,10 @@ class DownloadWorker(QRunnable):
                     err_msg = str(e)
                     log.error(f"Task {self.task_id} exhausted all auto-retries. Final Error: {err_msg}")
                     
-                    if "403" in err_msg or "Forbidden" in err_msg:
+                    cookie_hint = explain_cookie_failure(err_msg)
+                    if cookie_hint:
+                        friendly_err = f"Failed: {cookie_hint}"
+                    elif "403" in err_msg or "Forbidden" in err_msg:
                         friendly_err = "Failed: YouTube blocked request. Try updating yt-dlp."
                     elif "Sign in to confirm" in err_msg or "age" in err_msg:
                         friendly_err = "Failed: Video is age-restricted or private."

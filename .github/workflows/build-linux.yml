@@ -1,0 +1,22 @@
+name: Build Linux preview
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg aria2 libegl1 libopengl0 libxcb-cursor0 libxkbcommon-x11-0 libxcb-keysyms1 libxcb-icccm4
+      - run: bash packaging/build_release_linux.sh
+      - run: PYTHONPATH=. .venv-linux/bin/python packaging/check_linux_packages.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Linux-x86_64-preview
+          path: dist/*linux-*
