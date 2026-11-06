@@ -34,9 +34,17 @@ jobs:
         shell: powershell
         run: ./packaging/build_release.ps1
       - name: Run regression tests
+        shell: pwsh
         env:
           QT_QPA_PLATFORM: offscreen
-        run: venv/Scripts/python -m unittest discover -s tests -t . -q
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'ffmpeg-test.zip'
+          Invoke-WebRequest 'https://github.com/GyanD/codexffmpeg/releases/download/9.0.1/ffmpeg-9.0.1-essentials_build.zip' -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'fec81ae03971d9dd4be3ebe02e263bd2ec1d789483f931bdba5f5715e65da2e9') { throw 'FFmpeg test tool archive hash mismatch' }
+          $expanded = Join-Path $env:RUNNER_TEMP 'ffmpeg-test'
+          Expand-Archive $archive -DestinationPath $expanded
+          Copy-Item (Get-ChildItem $expanded -Recurse -Filter ffprobe.exe).FullName tools/ffprobe.exe
+          venv/Scripts/python -m unittest discover -s tests -t . -q
       - name: Check bundled FFmpeg formats
         run: venv/Scripts/python tests/ffmpeg_matrix.py tools/ffmpeg.exe
       - name: Verify packaged startup and installer extraction
