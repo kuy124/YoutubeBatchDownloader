@@ -30,13 +30,13 @@ jobs:
           $process = Start-Process $setup -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/DIR=$compilerDir") -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw 'Inno Setup installation failed' }
           "ISCC_PATH=$compilerDir\ISCC.exe" >> $env:GITHUB_ENV
+      - name: Build Windows installer and portable ZIP
+        shell: powershell
+        run: ./packaging/build_release.ps1
       - name: Run regression tests
         env:
           QT_QPA_PLATFORM: offscreen
         run: venv/Scripts/python -m unittest discover -s tests -t . -q
-      - name: Build Windows installer and portable ZIP
-        shell: powershell
-        run: ./packaging/build_release.ps1
       - name: Check bundled FFmpeg formats
         run: venv/Scripts/python tests/ffmpeg_matrix.py tools/ffmpeg.exe
       - name: Verify packaged startup and installer extraction
