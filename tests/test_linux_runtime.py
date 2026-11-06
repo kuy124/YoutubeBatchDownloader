@@ -172,8 +172,12 @@ class FFmpegIntegrationTests(unittest.TestCase):
                         {"vcodec": "mpeg4", "acodec": "none", "protocol": "https"},
                         {"vcodec": "none", "acodec": "aac", "protocol": "https"}],
                 })
-                streams = merger.get_metadata_object(merged)["streams"]
-            self.assertEqual({stream["codec_type"] for stream in streams}, {"video", "audio"})
+            # Require and decode both streams without depending on optional ffprobe.
+            subprocess.run(
+                [ffmpeg, "-v", "error", "-xerror", "-i", merged,
+                 "-map", "0:v:0", "-map", "0:a:0", "-f", "null", "-"],
+                check=True, capture_output=True,
+                env=platform_compat.external_tool_env())
 
 
 if __name__ == "__main__":
