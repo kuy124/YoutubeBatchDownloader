@@ -1,7 +1,13 @@
 name: Build Linux preview
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      publish_linux:
+        description: Replace Linux assets on release 1.9.6 after verification
+        type: boolean
+        default: false
 permissions:
-  contents: read
+  contents: write
 jobs:
   linux:
     runs-on: ubuntu-22.04
@@ -22,3 +28,8 @@ jobs:
         with:
           name: Linux-x86_64-preview
           path: dist/*linux-*
+      - name: Replace verified Linux release assets
+        if: inputs.publish_linux
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload 1.9.6 dist/*linux-* --clobber
