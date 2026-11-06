@@ -7,7 +7,7 @@ from .network import tls_context
 from PySide6.QtCore import QObject, QRunnable, Signal
 from .platform_compat import IS_WINDOWS
 
-APP_VERSION = "v1.9.6"
+APP_VERSION = "v1.9.7"
 RELEASES_URL = "https://github.com/kuy124/YoutubeBatchDownloader/releases"
 USER_AGENT = "YouTubeBatchDownloader-Updater"
 

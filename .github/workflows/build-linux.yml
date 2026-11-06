@@ -3,9 +3,13 @@ on:
   workflow_dispatch:
     inputs:
       publish_linux:
-        description: Replace Linux assets on release 1.9.6 after verification
+        description: Publish Linux assets after verification
         type: boolean
         default: false
+      release_tag:
+        description: Existing release tag to upload Linux packages to
+        type: string
+        default: '1.9.7'
 permissions:
   contents: write
 jobs:
@@ -32,4 +36,5 @@ jobs:
         if: inputs.publish_linux
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload 1.9.6 dist/*linux-* --clobber
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: gh release upload "$RELEASE_TAG" dist/*linux-* --clobber

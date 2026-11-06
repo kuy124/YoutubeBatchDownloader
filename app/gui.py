@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                                QLineEdit, QFileDialog, QTableWidget, QTableWidgetItem,
                                QHeaderView, QProgressBar, QMessageBox, QApplication, QScrollBar,
                                QGridLayout, QMenu, QSystemTrayIcon, QStyle, QDialog, QFormLayout,
-                               QScrollArea, QGroupBox)
+                               QScrollArea, QGroupBox, QSizePolicy)
 from PySide6.QtWidgets import QInputDialog, QProgressDialog
 from PySide6.QtCore import QThreadPool, Qt, QTimer
 from PySide6.QtGui import (QBrush, QColor, QIcon, QTextCharFormat, QTextCursor,
@@ -96,6 +96,37 @@ POST_BATCH_ACTIONS = [
 class NoScrollComboBox(QComboBox):
     def wheelEvent(self, event):
         event.ignore()
+
+
+class WrappingCheckBox(QCheckBox):
+    """Keep long preferences readable without imposing a single-line width."""
+    def __init__(self, text):
+        super().__init__()
+        self.setAccessibleName(text)
+        label = QLabel(text, self)
+        label.setWordWrap(True)
+        label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        layout = QHBoxLayout(self)
+        indicator = self.style().pixelMetric(QStyle.PM_IndicatorWidth)
+        spacing = self.style().pixelMetric(QStyle.PM_CheckBoxLabelSpacing)
+        layout.setContentsMargins(indicator + spacing, 0, 0, 0)
+        layout.addWidget(label)
+        policy = QSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+
+    def sizeHint(self):
+        return self.layout().sizeHint()
+
+    def minimumSizeHint(self):
+        return self.layout().minimumSize()
+
+    def heightForWidth(self, width):
+        return self.layout().totalHeightForWidth(width)
+
+    def hitButton(self, pos):
+        return self.rect().contains(pos)
 
 
 class MainWindow(QMainWindow):
@@ -595,17 +626,17 @@ class MainWindow(QMainWindow):
         path_row.addWidget(btn_open_in_settings)
         storage_box_lay.addLayout(path_row)
 
-        self.chk_aria2 = QCheckBox("Enable aria2c multi-connection acceleration (16 connections per file)")
+        self.chk_aria2 = WrappingCheckBox("Enable aria2c multi-connection acceleration (16 connections per file)")
         self.chk_aria2.toggled.connect(self._on_setting_checkbox_toggled)
-        self.chk_auto_clear = QCheckBox("Automatically clear completed downloads after 2 seconds")
+        self.chk_auto_clear = WrappingCheckBox("Automatically clear completed downloads after 2 seconds")
         self.chk_auto_clear.toggled.connect(self._on_setting_checkbox_toggled)
-        self.chk_restore_links = QCheckBox("Restore unfinished download links on startup")
+        self.chk_restore_links = WrappingCheckBox("Restore unfinished download links on startup")
         self.chk_restore_links.toggled.connect(self._on_setting_checkbox_toggled)
-        self.chk_confirm_exit = QCheckBox("Confirm before exiting when downloads are active")
+        self.chk_confirm_exit = WrappingCheckBox("Confirm before exiting when downloads are active")
         self.chk_confirm_exit.toggled.connect(self._on_setting_checkbox_toggled)
-        self.chk_expand_playlists = QCheckBox("Expand playlist and channel links into separate queue rows")
+        self.chk_expand_playlists = WrappingCheckBox("Expand playlist and channel links into separate queue rows")
         self.chk_expand_playlists.toggled.connect(self._on_setting_checkbox_toggled)
-        self.chk_skip_existing = QCheckBox("Skip items whose output file already exists in the download folder")
+        self.chk_skip_existing = WrappingCheckBox("Skip items whose output file already exists in the download folder")
         self.chk_skip_existing.toggled.connect(self._on_setting_checkbox_toggled)
 
         storage_box_lay.addWidget(self.chk_aria2)
@@ -745,10 +776,10 @@ class MainWindow(QMainWindow):
         theme_form.addRow("Color Theme:", self.combo_theme)
         appearance_box_lay.addLayout(theme_form)
 
-        self.chk_monitor_clip = QCheckBox("Monitor clipboard and automatically queue copied links")
-        self.chk_completion_sound = QCheckBox("Play audio chime when downloads finish")
+        self.chk_monitor_clip = WrappingCheckBox("Monitor clipboard and automatically queue copied links")
+        self.chk_completion_sound = WrappingCheckBox("Play audio chime when downloads finish")
         self.chk_completion_sound.toggled.connect(self._on_setting_checkbox_toggled)
-        self.chk_batch_notify = QCheckBox("Show system notification when downloads finish")
+        self.chk_batch_notify = WrappingCheckBox("Show system notification when downloads finish")
         self.chk_batch_notify.toggled.connect(self._on_setting_checkbox_toggled)
 
         appearance_box_lay.addWidget(self.chk_monitor_clip)
@@ -768,12 +799,11 @@ class MainWindow(QMainWindow):
         # Section 4: Application Updates
         self.grp_updates = QGroupBox("Updates")
         updates_lay = QVBoxLayout(self.grp_updates)
-        update_header = QHBoxLayout()
-        update_header.addWidget(QLabel(f"Application: {APP_VERSION}"))
-        update_header.addStretch()
+        update_header = QFormLayout()
+        update_header.setRowWrapPolicy(QFormLayout.WrapLongRows)
         btn_check_updates = QPushButton("Check for Updates...")
         btn_check_updates.clicked.connect(lambda: self.check_for_updates(manual=True))
-        update_header.addWidget(btn_check_updates)
+        update_header.addRow(f"Application: {APP_VERSION}", btn_check_updates)
         updates_lay.addLayout(update_header)
         ytdlp_status = get_runtime_status()
         self.lbl_ytdlp_version = QLabel(
@@ -784,6 +814,8 @@ class MainWindow(QMainWindow):
         updates_lay.addWidget(self.lbl_ytdlp_version)
         content_lay.addWidget(self.grp_updates)
 
+        for form in scroll_content.findChildren(QFormLayout):
+            form.setRowWrapPolicy(QFormLayout.WrapLongRows)
         self.settings_scroll.setWidget(scroll_content)
         settings_main_lay.addWidget(self.settings_scroll)
 
