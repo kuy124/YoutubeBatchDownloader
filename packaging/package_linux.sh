@@ -46,10 +46,10 @@ for binary in [*tools.iterdir(), *plugins]:
             continue
         shutil.copy2(path, destination / name)
 PY
-# Pin and verify the external packaging tool, even though its release tag moves.
+# Pin and verify a versioned external packaging tool (not the moving continuous tag).
 tool="$work/appimagetool.AppImage"
-curl -fL --retry 3 https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage -o "$tool"
-echo "62aebc77c2149e96b593b94da9bbd1881e0984a56399ff6d7a03b7ddd7c9ce68  $tool" | sha256sum -c -
+curl -fL --retry 3 https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage -o "$tool"
+echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  $tool" | sha256sum -c -
 chmod 755 "$tool"
 (cd "$work" && "$tool" --appimage-extract >/dev/null)
 portable="$PWD/dist/YouTubeBatchDownloader-${version}-linux-x86_64.AppImage"
