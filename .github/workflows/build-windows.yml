@@ -1,0 +1,80 @@
+name: Build Windows release
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 1.9.7
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install Python dependencies
+        run: |
+          python -m venv venv
+          venv/Scripts/python -m pip install -r requirements.txt pyinstaller
+      - name: Install pinned Inno Setup compiler
+        shell: pwsh
+        run: |
+          $setup = Join-Path $env:RUNNER_TEMP 'innosetup-6.7.3.exe'
+          Invoke-WebRequest 'https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe' -OutFile $setup
+          if ((Get-FileHash $setup -Algorithm SHA256).Hash.ToLowerInvariant() -ne '9c73c3bae7ed48d44112a0f48e66742c00090bdb5bef71d9d3c056c66e97b732') { throw 'Inno Setup download hash mismatch' }
+          $compilerDir = Join-Path $env:RUNNER_TEMP 'inno-6.7.3'
+          $process = Start-Process $setup -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/DIR=$compilerDir") -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw 'Inno Setup installation failed' }
+          "ISCC_PATH=$compilerDir\ISCC.exe" >> $env:GITHUB_ENV
+      - name: Run regression tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: venv/Scripts/python -m unittest discover -s tests -t . -q
+      - name: Build Windows installer and portable ZIP
+        shell: powershell
+        run: ./packaging/build_release.ps1
+      - name: Check bundled FFmpeg formats
+        run: venv/Scripts/python tests/ffmpeg_matrix.py tools/ffmpeg.exe
+      - name: Verify packaged startup and installer extraction
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $smoke = Join-Path $env:RUNNER_TEMP 'windows-smoke'
+          Expand-Archive dist/portable/*.zip -DestinationPath $smoke
+          $installer = (Get-ChildItem dist/installer/*-Setup.exe).FullName
+          $installed = Join-Path $env:RUNNER_TEMP 'installed-smoke'
+          $setup = Start-Process $installer -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/DIR=$installed") -Wait -PassThru
+          if ($setup.ExitCode -ne 0) { throw 'Application installer failed' }
+          $portableExe = Join-Path $smoke 'YoutubeBatchDownloader/YouTubeBatchDownloader.exe'
+          $installedExe = Join-Path $installed 'YouTubeBatchDownloader.exe'
+          if ((Get-FileHash $portableExe).Hash -ne (Get-FileHash $installedExe).Hash) { throw 'Installed and portable executable differ' }
+          foreach ($exe in @($portableExe, $installedExe)) {
+            $marker = Join-Path $env:RUNNER_TEMP ([guid]::NewGuid().ToString() + '.json')
+            $process = Start-Process $exe -ArgumentList @('--startup-marker', $marker) -PassThru
+            try {
+              $deadline = (Get-Date).AddSeconds(90)
+              while (!(Test-Path $marker) -and (Get-Date) -lt $deadline -and !$process.HasExited) { Start-Sleep 1 }
+              if (!(Test-Path $marker)) { throw "Packaged startup failed: $exe" }
+              $state = Get-Content $marker -Raw | ConvertFrom-Json
+              if (!$state.stages_ms.PSObject.Properties['first_paint']) { throw 'First paint marker missing' }
+            } finally {
+              if (!$process.HasExited) { Stop-Process -Id $process.Id -Force }
+            }
+          }
+      - name: Publish Windows assets to 1.9.7
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $assets = @(Get-ChildItem dist/portable/*.zip; Get-ChildItem dist/installer/*-Setup.exe)
+          foreach ($asset in $assets) {
+            $hash = (Get-FileHash $asset.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($asset.Name)" | Set-Content "$($asset.FullName).sha256" -Encoding ascii
+          }
+          gh release upload 1.9.7 dist/portable/* dist/installer/* dist/metadata/* --clobber
