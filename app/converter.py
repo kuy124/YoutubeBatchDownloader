@@ -5,6 +5,7 @@ import subprocess
 from mutagen.id3 import ID3, TIT2, TPE1, APIC, ID3NoHeaderError
 from mutagen.wave import WAVE
 from .logger import log
+from .platform_compat import external_tool_env
 from .utils import build_audio_boost_filter, get_ffmpeg_path, image_to_jpeg_bytes
 
 
@@ -93,7 +94,7 @@ def convert_m4a_to_mp3_fast(source_audio: str, mp3_path: str, title: str = "", a
         mp3_path
     ])
 
-    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, creationflags=creationflags)
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, creationflags=creationflags, env=external_tool_env())
     while proc.poll() is None:
         if is_cancelled_cb and is_cancelled_cb():
             proc.kill()

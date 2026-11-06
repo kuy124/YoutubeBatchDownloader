@@ -7,3 +7,4 @@ yt-dlp>=2023.11.16
 # signature challenge without it, which silently drops every audio format.
 yt-dlp-ejs>=0.8.0
 mutagen>=1.47.0
+certifi>=2024.2.2

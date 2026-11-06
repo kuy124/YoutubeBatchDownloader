@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 from PySide6.QtCore import QObject, QRunnable, Signal
 
 from .logger import log
+from .network import tls_context
 from .utils import get_data_dir, migrate_legacy_data
 
 
@@ -113,7 +114,7 @@ def _select_wheel(release_files: list) -> dict:
 
 def _download_current_stable(status_callback=None) -> tuple[str, Path]:
     request = urllib.request.Request(PYPI_URL, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=8) as response:
+    with urllib.request.urlopen(request, timeout=8, context=tls_context()) as response:
         metadata = json.loads(response.read().decode("utf-8"))
     version = str(metadata.get("info", {}).get("version") or "")
     if not version or not re.fullmatch(r'[0-9A-Za-z.+-]+', version):
@@ -134,7 +135,7 @@ def _download_current_stable(status_callback=None) -> tuple[str, Path]:
     hasher = hashlib.sha256()
     try:
         wheel_request = urllib.request.Request(wheel["url"], headers={"User-Agent": USER_AGENT})
-        with urllib.request.urlopen(wheel_request, timeout=30) as response, wheel_path.open("wb") as output:
+        with urllib.request.urlopen(wheel_request, timeout=30, context=tls_context()) as response, wheel_path.open("wb") as output:
             while chunk := response.read(1024 * 1024):
                 output.write(chunk)
                 hasher.update(chunk)

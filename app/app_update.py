@@ -11,6 +11,7 @@ import zipfile
 from pathlib import PurePosixPath
 
 from PySide6.QtCore import QObject, QRunnable, Signal
+from .network import tls_context
 
 
 USER_AGENT = "YouTubeBatchDownloader-Updater"
@@ -80,7 +81,7 @@ class AppUpdateDownloadWorker(QRunnable):
                 self.release["download_url"], headers={"User-Agent": USER_AGENT})
             received = 0
             hasher = hashlib.sha256()
-            with urllib.request.urlopen(request, timeout=30) as response, open(download_path, "wb") as output:
+            with urllib.request.urlopen(request, timeout=30, context=tls_context()) as response, open(download_path, "wb") as output:
                 total = int(response.headers.get("Content-Length") or self.release.get("size") or 0)
                 while chunk := response.read(1024 * 1024):
                     if self._cancelled.is_set():

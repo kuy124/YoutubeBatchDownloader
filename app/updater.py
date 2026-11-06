@@ -2,6 +2,7 @@ import re
 from html.parser import HTMLParser
 from urllib.parse import unquote, urlsplit
 import urllib.request
+from .network import tls_context
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 from .platform_compat import IS_WINDOWS
@@ -101,7 +102,7 @@ class UpdateWorker(QRunnable):
     def run(self):
         req = urllib.request.Request(RELEASES_URL + '/latest', headers={'User-Agent': USER_AGENT})
         try:
-            with urllib.request.urlopen(req, timeout=8) as resp:
+            with urllib.request.urlopen(req, timeout=8, context=tls_context()) as resp:
                 release_url = resp.geturl()
             if not release_url.startswith(RELEASES_URL + '/tag/'):
                 raise ValueError("GitHub did not return a release version.")
@@ -115,7 +116,7 @@ class UpdateWorker(QRunnable):
 
             req = urllib.request.Request(RELEASES_URL + '/expanded_assets/' + tag,
                                          headers={'User-Agent': USER_AGENT})
-            with urllib.request.urlopen(req, timeout=8) as resp:
+            with urllib.request.urlopen(req, timeout=8, context=tls_context()) as resp:
                 parser = ReleaseAssetsParser(tag)
                 parser.feed(resp.read().decode('utf-8'))
             asset = (select_windows_asset if IS_WINDOWS else select_linux_asset)(parser.assets)

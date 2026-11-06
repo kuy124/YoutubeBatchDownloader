@@ -15,6 +15,18 @@ IS_WINDOWS = os.name == "nt"
 APP_DIR_NAME = "YouTubeBatchDownloader"
 
 
+def external_tool_env() -> dict:
+    """Do not load PyInstaller's private libraries into system executables."""
+    env = os.environ.copy()
+    if sys.platform.startswith("linux") and getattr(sys, "frozen", False):
+        original = env.get("LD_LIBRARY_PATH_ORIG")
+        if original is None:
+            env.pop("LD_LIBRARY_PATH", None)
+        else:
+            env["LD_LIBRARY_PATH"] = original
+    return env
+
+
 def tool_name(name: str) -> str:
     """Bundled tool filename: ffmpeg stays ffmpeg, ffmpeg.exe on Windows."""
     return f"{name}.exe" if IS_WINDOWS else name

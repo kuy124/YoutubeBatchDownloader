@@ -48,6 +48,13 @@ sudo apt install ffmpeg aria2 nodejs libegl1 libopengl0 libxcb-cursor0 libxkbcom
 
 For Fedora and Arch, try the AppImage rather than the `.deb`. Those distributions have not been tested yet. Replace the AppImage with the newer download to update.
 
+Linux prefers a working system FFmpeg before bundled tools. Install both
+`ffmpeg` and `ffprobe` if needed (on Fedora: `sudo dnf install ffmpeg-free`).
+Distribution builds may support fewer codecs; use a full FFmpeg build if a
+requested output codec is unavailable. Update checks use the host CA store,
+with bundled CA certificates as a fallback. For a private CA, configure
+`SSL_CERT_FILE` or `SSL_CERT_DIR`; update TLS verification stays enabled.
+
 The 1.9.6 release was built and startup-tested on Ubuntu 24.04 and requires an equivalent or newer system library stack. Older Ubuntu versions, Fedora, and Arch remain unverified; Ubuntu 22.04 compatibility needs a separate build from the GitHub Actions workflow.
 
 ## Your first download

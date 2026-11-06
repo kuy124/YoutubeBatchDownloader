@@ -2,6 +2,7 @@ import concurrent.futures
 import os
 import re
 import subprocess
+from .platform_compat import external_tool_env
 import threading  # Guards the shared in-memory title cache across worker threads
 import time  # Used for cooling-off pause during automatic retries
 import urllib.request
@@ -691,7 +692,7 @@ class DownloadWorker(QRunnable):
             '-write_id3v2', '1',
             aac_path
         ])
-        proc = subprocess.Popen(aac_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creationflags)
+        proc = subprocess.Popen(aac_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creationflags, env=external_tool_env())
 
         self.current_process = proc
         while proc.poll() is None:
@@ -815,10 +816,6 @@ class DownloadWorker(QRunnable):
                 return
 
         ffmpeg_path = get_ffmpeg_path()
-        if ffmpeg_path:
-            ffmpeg_dir = os.path.dirname(ffmpeg_path)
-            if ffmpeg_dir and ffmpeg_dir not in os.environ.get("PATH", ""):
-                os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
 
         ydl_opts = {
             'outtmpl': build_output_template(
@@ -901,7 +898,11 @@ class DownloadWorker(QRunnable):
         video_format = build_video_format_string(max_h)
 
         if not ffmpeg_path:
-            self.signals.error.emit(self.task_id, "Failed: FFmpeg binary missing in tools/. Please run install.bat.")
+            self.signals.error.emit(
+                self.task_id,
+                "Failed: No working FFmpeg found. Install FFmpeg and ffprobe "
+                "on your system PATH, or place executable binaries in tools/. "
+                "On Fedora: sudo dnf install ffmpeg-free")
             return
 
         ydl_opts.update(build_format_options(

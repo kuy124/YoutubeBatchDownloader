@@ -5,12 +5,13 @@ import sys
 import json
 import shutil
 import ssl
+import subprocess
 import tempfile
 import urllib.parse
 import urllib.request
 from urllib.parse import parse_qs, urlparse
 
-from .platform_compat import tool_name, user_data_dir
+from .platform_compat import tool_name, user_data_dir, external_tool_env
 
 
 APP_NAME = "YouTubeBatchDownloader"
@@ -107,24 +108,38 @@ def migrate_legacy_data() -> bool:
 
 
 def get_ffmpeg_path() -> str:
-    """Returns the absolute path to ffmpeg (bundled, local workspace, or global system path)."""
+    """Find a runnable FFmpeg, preferring distro binaries on Linux."""
     executable = tool_name("ffmpeg")
+    candidates = []
+    system_path = shutil.which('ffmpeg')
+    if sys.platform.startswith("linux") and system_path:
+        candidates.append(system_path)
     # 1. Check if running inside PyInstaller virtual unpacked environment (_MEIPASS)
     if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
         bundled_path = os.path.join(sys._MEIPASS, "tools", executable)
-        if os.path.exists(bundled_path):
-            return bundled_path
+        candidates.append(bundled_path)
 
     # 2. Check local tools directory and root directory
     for rel_path in [os.path.join("tools", executable), executable]:
         local_path = os.path.join(get_install_dir(), rel_path)
-        if os.path.exists(local_path):
-            return local_path
+        candidates.append(local_path)
 
     # 3. Check system PATH globally
-    system_path = shutil.which('ffmpeg')
     if system_path:
-        return system_path
+        candidates.append(system_path)
+
+    for path in dict.fromkeys(candidates):
+        if not os.path.isfile(path) or not os.access(path, os.X_OK):
+            continue
+        try:
+            result = subprocess.run(
+                [path, '-version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=5, env=external_tool_env(),
+                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            if result.returncode == 0 and result.stdout.startswith(b'ffmpeg version'):
+                return os.path.abspath(path)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
 
     return ""
 
